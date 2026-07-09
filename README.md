@@ -57,3 +57,16 @@ Open PowerShell from the repo folder and run:
 ## Author
 
 Created and maintained by Francisco Calvo.
+
+## Phase 3 - Sync Selected
+
+Implemented:
+
+- Sync Selected button.
+- Pre-check confirmation before sync.
+- Commit local changes when required.
+- Pull using git pull --ff-only.
+- Push current branch to origin.
+- Stop on first failure.
+- Do not push if pull fails.
+- Refresh status after sync.

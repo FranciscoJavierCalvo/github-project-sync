@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0 - Phase 3 Sync Selected
+
+### Added
+
+- Added Sync Selected button.
+- Added selected-project sync workflow.
+- Added pre-check confirmation summary.
+- Added commit-if-needed logic.
+- Added safe pull using git pull --ff-only.
+- Added push after successful pull.
+- Added stop-on-first-failure behaviour.
+- Added final success message.
+- Added automatic status refresh after sync.
+
+### Safety
+
+- No force push.
+- No reset hard.
+- No git clean.
+- No branch switching.
+- No automatic conflict resolution.
+- Push is not attempted if pull fails.
+
 ## 0.1.0 - Phase 1 Read-Only GUI
 
 ### Added
@@ -19,3 +42,4 @@
 
 - Phase 1 is read-only
 - No write Git commands are used
+

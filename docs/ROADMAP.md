@@ -29,3 +29,16 @@
 - Sync all projects
 - Summary report
 - Dry-run mode
+
+## Phase 4 - Sync All Projects
+
+Status: Planned
+
+Planned:
+
+- Preview Sync All.
+- Sync All.
+- Process projects one by one.
+- Skip unsafe projects.
+- Stop on first error by default.
+- Produce a summary report.

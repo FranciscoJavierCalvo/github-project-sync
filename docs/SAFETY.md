@@ -20,3 +20,15 @@ Future phases must avoid:
 - automatic conflict resolution
 
 Future phases should require confirmation before push and a commit message before commit.
+
+## Phase 3 Safety
+
+- Sync Selected runs against one selected project only.
+- A pre-check summary is shown before sync.
+- Commit message is required when local changes exist.
+- Pull uses git pull --ff-only.
+- Push is not attempted if pull fails.
+- No force push.
+- No reset hard.
+- No git clean.
+- No automatic conflict resolution.
