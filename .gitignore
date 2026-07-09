@@ -34,3 +34,6 @@ Transcript*.txt
 # Documentation backup/temp files
 *.backup_*
 Update-Docs-*.ps1
+
+# Generated reports
+reports/

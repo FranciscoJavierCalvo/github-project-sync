@@ -911,7 +911,7 @@ function Push-SelectedProject {
 Initialize-Log
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "GitHub Project Sync Manager - Phase 4.2 Sync All"
+$form.Text = "GitHub Project Sync Manager - Phase 5.1 Export Report"
 $form.Size = New-Object System.Drawing.Size(1680, 880)
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = New-Object System.Drawing.Size(1450, 760)
@@ -1012,8 +1012,14 @@ $btnDetails.Size = New-Object System.Drawing.Size(100, 32)
 $btnDetails.Text = "Details"
 $form.Controls.Add($btnDetails)
 
+
+$btnExportReport = New-Object System.Windows.Forms.Button
+$btnExportReport.Location = New-Object System.Drawing.Point(1462, 45)
+$btnExportReport.Size = New-Object System.Drawing.Size(100, 32)
+$btnExportReport.Text = "Export Report"
+$form.Controls.Add($btnExportReport)
 $btnClearLog = New-Object System.Windows.Forms.Button
-$btnClearLog.Location = New-Object System.Drawing.Point(1462, 45)
+$btnClearLog.Location = New-Object System.Drawing.Point(1572, 45)
 $btnClearLog.Size = New-Object System.Drawing.Size(100, 32)
 $btnClearLog.Text = "Clear Log"
 $form.Controls.Add($btnClearLog)
@@ -1051,7 +1057,7 @@ $script:chkBlockPullWithChanges = $chkBlockPullWithChanges
 $lblSafety = New-Object System.Windows.Forms.Label
 $lblSafety.Location = New-Object System.Drawing.Point(12, 118)
 $lblSafety.Size = New-Object System.Drawing.Size(1380, 22)
-$lblSafety.Text = "Phase 4.2 safety: Sync All processes safe projects one by one. No force push, reset hard, clean, branch switching, or automatic conflict resolution."
+$lblSafety.Text = "Phase 5.1 safety: Export Report is read-only. No Git actions are executed by report export."
 $lblSafety.ForeColor = [System.Drawing.Color]::DarkGreen
 $lblSafety.Font = $fontBold
 $form.Controls.Add($lblSafety)
@@ -1152,6 +1158,10 @@ $btnDetails.Add_Click({
     Show-Details
 })
 
+
+$btnExportReport.Add_Click({
+    Export-SyncReport
+})
 $btnClearLog.Add_Click({
     $script:txtLog.Clear()
     Write-GuiLog -Message "Log cleared."
@@ -1167,7 +1177,7 @@ $lvProjects.Add_DoubleClick({
 
 $form.Add_Shown({
     Write-GuiLog -Message "GitHub Project Sync Manager started."
-    Write-GuiLog -Message "Phase: 4.2 - Sync All"
+    Write-GuiLog -Message "Phase: 5.1 - Export Report"
     Write-GuiLog -Message "Config path: $script:ConfigPath"
     Write-GuiLog -Message "Log file: $script:LogFile"
 
@@ -1799,7 +1809,125 @@ function Sync-AllProjects {
     )
 }
 
+
+function Export-SyncReport {
+    Write-GuiLog -Message "Export Report clicked."
+
+    if ($script:Projects.Count -eq 0) {
+        Write-GuiLog -Message "No projects loaded. Loading projects before export."
+        Load-Projects
+    }
+
+    if ($script:Projects.Count -gt 0) {
+        Write-GuiLog -Message "Refreshing project status before export."
+        Refresh-List
+    }
+
+    $reportsFolder = Join-Path -Path $script:ScriptRoot -ChildPath "reports"
+
+    if (-not (Test-Path -LiteralPath $reportsFolder)) {
+        New-Item -Path $reportsFolder -ItemType Directory -Force | Out-Null
+    }
+
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $reportPath = Join-Path -Path $reportsFolder -ChildPath "GitHubProjectSync_Report_$timestamp.txt"
+
+    $report = @()
+    $report += "GitHub Project Sync Manager Report"
+    $report += "Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")"
+    $report += "Phase: 5.1 - Export Sync Report"
+    $report += "Config path: $script:ConfigPath"
+    $report += "Log file: $script:LogFile"
+    $report += ""
+
+    if ($script:LastStatus.Count -eq 0) {
+        $report += "No project status results were available."
+        $report += "Use Check Status, Preview Sync All, Sync Selected, or Sync All before exporting for a fuller report."
+        $report += ""
+    }
+    else {
+        $report += "Project Summary"
+        $report += "---------------"
+        $report += "Projects found: $($script:LastStatus.Count)"
+        $report += ""
+
+        $projectNumber = 1
+        $cleanCount = 0
+        $modifiedCount = 0
+        $blockedCount = 0
+        $safeCount = 0
+
+        foreach ($status in $script:LastStatus) {
+            if ($status.LocalStatus -eq "Clean") {
+                $cleanCount++
+            }
+
+            if ($status.LocalStatus -eq "Modified") {
+                $modifiedCount++
+            }
+
+            if ($status.ActionAllowed -eq "Yes") {
+                $safeCount++
+            }
+            else {
+                $blockedCount++
+            }
+
+            $report += "$projectNumber. $($status.Name)"
+            $report += "   Local path: $($status.LocalPath)"
+            $report += "   Current branch: $($status.CurrentBranch)"
+            $report += "   Default branch: $($status.DefaultBranch)"
+            $report += "   Folder status: $($status.FolderStatus)"
+            $report += "   Git repo status: $($status.GitRepoStatus)"
+            $report += "   Local status: $($status.LocalStatus)"
+            $report += "   Changes: $($status.ChangeCount)"
+            $report += "   Ahead/Behind: $($status.AheadBehind)"
+            $report += "   Remote match: $($status.RemoteMatch)"
+            $report += "   Action allowed: $($status.ActionAllowed)"
+            $report += "   Origin remote URL: $($status.RemoteUrl)"
+            $report += ""
+
+            $projectNumber++
+        }
+
+        $report += "Totals"
+        $report += "------"
+        $report += "Safe projects: $safeCount"
+        $report += "Blocked projects: $blockedCount"
+        $report += "Clean projects: $cleanCount"
+        $report += "Modified projects: $modifiedCount"
+        $report += ""
+    }
+
+    $report += "Visible GUI Log"
+    $report += "---------------"
+
+    if ($null -ne $script:txtLog) {
+        if ($script:txtLog.Text.Trim().Length -gt 0) {
+            $report += $script:txtLog.Text
+        }
+        else {
+            $report += "The visible GUI log was empty at export time."
+        }
+    }
+    else {
+        $report += "The GUI log control was not available."
+    }
+
+    Set-Content -LiteralPath $reportPath -Value $report -Encoding UTF8
+
+    Write-GuiLog -Message "Report exported to: $reportPath"
+
+    [void][System.Windows.Forms.MessageBox]::Show(
+        "Report exported successfully.`r`n`r`n$reportPath",
+        "Export Report",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+}
+
 [void]$form.ShowDialog()
+
 
 
 
