@@ -930,7 +930,7 @@ function Push-SelectedProject {
 Initialize-Log
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "GitHub Project Sync Manager - Phase 5.2 Last Action Tracking"
+$form.Text = "GitHub Project Sync Manager - Phase 5.3 Enhanced Reports"
 $form.Size = New-Object System.Drawing.Size(1680, 880)
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = New-Object System.Drawing.Size(1450, 760)
@@ -1076,7 +1076,7 @@ $script:chkBlockPullWithChanges = $chkBlockPullWithChanges
 $lblSafety = New-Object System.Windows.Forms.Label
 $lblSafety.Location = New-Object System.Drawing.Point(12, 118)
 $lblSafety.Size = New-Object System.Drawing.Size(1380, 22)
-$lblSafety.Text = "Phase 5.2 safety: Last action tracking is UI/reporting only. Git safety rules remain unchanged."
+$lblSafety.Text = "Phase 5.3 safety: Enhanced report export is read-only. Git safety rules remain unchanged."
 $lblSafety.ForeColor = [System.Drawing.Color]::DarkGreen
 $lblSafety.Font = $fontBold
 $form.Controls.Add($lblSafety)
@@ -1182,7 +1182,7 @@ $btnDetails.Add_Click({
 
 
 $btnExportReport.Add_Click({
-    Export-SyncReport
+    Export-SyncReportBundle
 })
 $btnClearLog.Add_Click({
     $script:txtLog.Clear()
@@ -1199,7 +1199,7 @@ $lvProjects.Add_DoubleClick({
 
 $form.Add_Shown({
     Write-GuiLog -Message "GitHub Project Sync Manager started."
-    Write-GuiLog -Message "Phase: 5.2 - Last Action Tracking"
+    Write-GuiLog -Message "Phase: 5.3 - Enhanced Reports"
     Write-GuiLog -Message "Config path: $script:ConfigPath"
     Write-GuiLog -Message "Log file: $script:LogFile"
 
@@ -2004,7 +2004,191 @@ function Set-ProjectRunState {
     $script:ProjectRunState[$ProjectName] = $state
 }
 
+
+function Export-SyncReportBundle {
+    Write-GuiLog -Message "Enhanced Export Report clicked."
+
+    if ($script:Projects.Count -eq 0) {
+        Write-GuiLog -Message "No projects loaded. Loading projects before export."
+        Load-Projects
+    }
+
+    if ($script:Projects.Count -gt 0) {
+        Write-GuiLog -Message "Refreshing project status before enhanced export."
+        Refresh-List
+    }
+
+    $reportsFolder = Join-Path -Path $script:ScriptRoot -ChildPath "reports"
+
+    if (-not (Test-Path -LiteralPath $reportsFolder)) {
+        New-Item -Path $reportsFolder -ItemType Directory -Force | Out-Null
+    }
+
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+    $txtPath = Join-Path -Path $reportsFolder -ChildPath "GitHubProjectSync_Report_$timestamp.txt"
+    $csvPath = Join-Path -Path $reportsFolder -ChildPath "GitHubProjectSync_Report_$timestamp.csv"
+    $jsonPath = Join-Path -Path $reportsFolder -ChildPath "GitHubProjectSync_Report_$timestamp.json"
+
+    $projectRows = @()
+
+    foreach ($status in $script:LastStatus) {
+        $runState = Get-ProjectRunState -ProjectName $status.Name
+
+        $row = [PSCustomObject]@{
+            Name = $status.Name
+            LocalPath = $status.LocalPath
+            CurrentBranch = $status.CurrentBranch
+            DefaultBranch = $status.DefaultBranch
+            FolderStatus = $status.FolderStatus
+            GitRepoStatus = $status.GitRepoStatus
+            LocalStatus = $status.LocalStatus
+            ChangeCount = $status.ChangeCount
+            AheadBehind = $status.AheadBehind
+            RemoteMatch = $status.RemoteMatch
+            ActionAllowed = $status.ActionAllowed
+            LastAction = $runState.LastAction
+            LastResult = $runState.LastResult
+            OriginRemoteUrl = $status.RemoteUrl
+        }
+
+        $projectRows += $row
+    }
+
+    $cleanCount = 0
+    $modifiedCount = 0
+    $safeCount = 0
+    $blockedCount = 0
+
+    foreach ($row in $projectRows) {
+        if ($row.LocalStatus -eq "Clean") {
+            $cleanCount++
+        }
+
+        if ($row.LocalStatus -eq "Modified") {
+            $modifiedCount++
+        }
+
+        if ($row.ActionAllowed -eq "Yes") {
+            $safeCount++
+        }
+        else {
+            $blockedCount++
+        }
+    }
+
+    $visibleLog = ""
+
+    if ($null -ne $script:txtLog) {
+        if ($null -ne $script:txtLog.Text -and $script:txtLog.Text.Trim().Length -gt 0) {
+            $visibleLog = $script:txtLog.Text
+        }
+        else {
+            $visibleLog = "The visible GUI log was empty at export time."
+        }
+    }
+    else {
+        $visibleLog = "The GUI log control was not available."
+    }
+
+    # TXT report
+    $txtReport = @()
+    $txtReport += "GitHub Project Sync Manager Report"
+    $txtReport += "Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")"
+    $txtReport += "Phase: 5.3 - Enhanced Report Export"
+    $txtReport += "Config path: $script:ConfigPath"
+    $txtReport += "Log file: $script:LogFile"
+    $txtReport += ""
+    $txtReport += "Totals"
+    $txtReport += "------"
+    $txtReport += "Projects found: $($projectRows.Count)"
+    $txtReport += "Safe projects: $safeCount"
+    $txtReport += "Blocked projects: $blockedCount"
+    $txtReport += "Clean projects: $cleanCount"
+    $txtReport += "Modified projects: $modifiedCount"
+    $txtReport += ""
+
+    $itemNumber = 1
+
+    foreach ($row in $projectRows) {
+        $txtReport += "$itemNumber. $($row.Name)"
+        $txtReport += "   Local path: $($row.LocalPath)"
+        $txtReport += "   Current branch: $($row.CurrentBranch)"
+        $txtReport += "   Default branch: $($row.DefaultBranch)"
+        $txtReport += "   Folder status: $($row.FolderStatus)"
+        $txtReport += "   Git repo status: $($row.GitRepoStatus)"
+        $txtReport += "   Local status: $($row.LocalStatus)"
+        $txtReport += "   Changes: $($row.ChangeCount)"
+        $txtReport += "   Ahead/Behind: $($row.AheadBehind)"
+        $txtReport += "   Remote match: $($row.RemoteMatch)"
+        $txtReport += "   Action allowed: $($row.ActionAllowed)"
+        $txtReport += "   Last action: $($row.LastAction)"
+        $txtReport += "   Last result: $($row.LastResult)"
+        $txtReport += "   Origin remote URL: $($row.OriginRemoteUrl)"
+        $txtReport += ""
+
+        $itemNumber++
+    }
+
+    $txtReport += "Visible GUI Log"
+    $txtReport += "---------------"
+    $txtReport += $visibleLog
+
+    Set-Content -LiteralPath $txtPath -Value $txtReport -Encoding UTF8
+
+    # CSV report
+    if ($projectRows.Count -gt 0) {
+        $projectRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    }
+    else {
+        $emptyRow = [PSCustomObject]@{
+            Message = "No project status results were available."
+        }
+
+        $emptyRow | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    }
+
+    # JSON report
+    $jsonObject = [PSCustomObject]@{
+        Generated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Phase = "5.3 - Enhanced Report Export"
+        ConfigPath = $script:ConfigPath
+        LogFile = $script:LogFile
+        Totals = [PSCustomObject]@{
+            ProjectsFound = $projectRows.Count
+            SafeProjects = $safeCount
+            BlockedProjects = $blockedCount
+            CleanProjects = $cleanCount
+            ModifiedProjects = $modifiedCount
+        }
+        Projects = $projectRows
+        VisibleGuiLog = $visibleLog
+    }
+
+    $jsonText = $jsonObject | ConvertTo-Json -Depth 6
+    Set-Content -LiteralPath $jsonPath -Value $jsonText -Encoding UTF8
+
+    foreach ($status in $script:LastStatus) {
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Export Report" -LastResult "TXT CSV JSON Exported"
+    }
+
+    Refresh-List
+
+    Write-GuiLog -Message "Enhanced reports exported:"
+    Write-GuiLog -Message "TXT: $txtPath"
+    Write-GuiLog -Message "CSV: $csvPath"
+    Write-GuiLog -Message "JSON: $jsonPath"
+
+    [void][System.Windows.Forms.MessageBox]::Show(
+        "Reports exported successfully.`r`n`r`nTXT:`r`n$txtPath`r`n`r`nCSV:`r`n$csvPath`r`n`r`nJSON:`r`n$jsonPath",
+        "Export Report",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+}
+
 [void]$form.ShowDialog()
+
 
 
 
