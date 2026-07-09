@@ -911,7 +911,7 @@ function Push-SelectedProject {
 Initialize-Log
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "GitHub Project Sync Manager - Phase 3 Sync Selected"
+$form.Text = "GitHub Project Sync Manager - Phase 4.1 Preview Sync All"
 $form.Size = New-Object System.Drawing.Size(1480, 880)
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = New-Object System.Drawing.Size(1250, 760)
@@ -983,27 +983,32 @@ $btnSync.Location = New-Object System.Drawing.Point(662, 45)
 $btnSync.Size = New-Object System.Drawing.Size(120, 32)
 $btnSync.Text = "Sync Selected"
 $form.Controls.Add($btnSync)
+$btnPreviewSyncAll = New-Object System.Windows.Forms.Button
+$btnPreviewSyncAll.Location = New-Object System.Drawing.Point(792, 45)
+$btnPreviewSyncAll.Size = New-Object System.Drawing.Size(140, 32)
+$btnPreviewSyncAll.Text = "Preview Sync All"
+$form.Controls.Add($btnPreviewSyncAll)
 
 $btnOpenFolder = New-Object System.Windows.Forms.Button
-$btnOpenFolder.Location = New-Object System.Drawing.Point(792, 45)
+$btnOpenFolder.Location = New-Object System.Drawing.Point(942, 45)
 $btnOpenFolder.Size = New-Object System.Drawing.Size(120, 32)
 $btnOpenFolder.Text = "Open Folder"
 $form.Controls.Add($btnOpenFolder)
 
 $btnOpenRepo = New-Object System.Windows.Forms.Button
-$btnOpenRepo.Location = New-Object System.Drawing.Point(922, 45)
+$btnOpenRepo.Location = New-Object System.Drawing.Point(1072, 45)
 $btnOpenRepo.Size = New-Object System.Drawing.Size(140, 32)
 $btnOpenRepo.Text = "Open GitHub Repo"
 $form.Controls.Add($btnOpenRepo)
 
 $btnDetails = New-Object System.Windows.Forms.Button
-$btnDetails.Location = New-Object System.Drawing.Point(1072, 45)
+$btnDetails.Location = New-Object System.Drawing.Point(1222, 45)
 $btnDetails.Size = New-Object System.Drawing.Size(100, 32)
 $btnDetails.Text = "Details"
 $form.Controls.Add($btnDetails)
 
 $btnClearLog = New-Object System.Windows.Forms.Button
-$btnClearLog.Location = New-Object System.Drawing.Point(1182, 45)
+$btnClearLog.Location = New-Object System.Drawing.Point(1332, 45)
 $btnClearLog.Size = New-Object System.Drawing.Size(100, 32)
 $btnClearLog.Text = "Clear Log"
 $form.Controls.Add($btnClearLog)
@@ -1041,7 +1046,7 @@ $script:chkBlockPullWithChanges = $chkBlockPullWithChanges
 $lblSafety = New-Object System.Windows.Forms.Label
 $lblSafety.Location = New-Object System.Drawing.Point(12, 118)
 $lblSafety.Size = New-Object System.Drawing.Size(1380, 22)
-$lblSafety.Text = "Phase 3 safety: selected-project sync only. No force push, reset hard, clean, branch switching, or automatic conflict resolution."
+$lblSafety.Text = "Phase 4.1 safety: Preview Sync All is dry-run only. No commit, pull, push, reset, clean, branch switching, or automatic conflict resolution."
 $lblSafety.ForeColor = [System.Drawing.Color]::DarkGreen
 $lblSafety.Font = $fontBold
 $form.Controls.Add($lblSafety)
@@ -1123,6 +1128,9 @@ $btnPush.Add_Click({
 $btnSync.Add_Click({
     Sync-SelectedProject
 })
+$btnPreviewSyncAll.Add_Click({
+    Preview-SyncAllProjects
+})
 
 $btnOpenFolder.Add_Click({
     Open-SelectedFolder
@@ -1151,7 +1159,7 @@ $lvProjects.Add_DoubleClick({
 
 $form.Add_Shown({
     Write-GuiLog -Message "GitHub Project Sync Manager started."
-    Write-GuiLog -Message "Phase: 3 - Sync Selected"
+    Write-GuiLog -Message "Phase: 4.1 - Preview Sync All"
     Write-GuiLog -Message "Config path: $script:ConfigPath"
     Write-GuiLog -Message "Log file: $script:LogFile"
 
@@ -1357,7 +1365,112 @@ function Sync-SelectedProject {
     )
 }
 
+
+function Preview-SyncAllProjects {
+    Write-GuiLog -Message "Preview Sync All clicked."
+
+    if ($script:Projects.Count -eq 0) {
+        Write-GuiLog -Message "No projects loaded. Loading projects before preview."
+        Load-Projects
+    }
+
+    if ($script:Projects.Count -eq 0) {
+        Write-GuiLog -Message "Preview Sync All blocked. No projects are configured." -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "No projects are configured.`r`n`r`nPlease check projects.json.",
+            "Preview Sync All",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    Write-GuiLog -Message "Refreshing project status before Preview Sync All."
+    Refresh-List
+
+    if ($script:LastStatus.Count -eq 0) {
+        Write-GuiLog -Message "Preview Sync All blocked. No project status results are available." -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "No project status results are available.`r`n`r`nClick Check Status and try again.",
+            "Preview Sync All",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    $summary = @()
+    $summary += "Preview Sync All"
+    $summary += ""
+    $summary += "This is a dry-run preview only."
+    $summary += "No commit, pull, push, reset, clean, checkout, merge, or rebase commands will be executed."
+    $summary += ""
+    $summary += "Projects found: $($script:LastStatus.Count)"
+    $summary += ""
+
+    $projectNumber = 1
+    $safeCount = 0
+    $blockedCount = 0
+    $modifiedCount = 0
+    $cleanCount = 0
+
+    foreach ($status in $script:LastStatus) {
+        $plannedAction = ""
+
+        if ($status.ActionAllowed -ne "Yes") {
+            $plannedAction = "Skip - action is not allowed"
+            $blockedCount++
+        }
+        elseif ($status.ChangeCount -gt 0) {
+            $plannedAction = "Would require commit message, then pull --ff-only, then push"
+            $safeCount++
+            $modifiedCount++
+        }
+        else {
+            $plannedAction = "Would pull --ff-only, then push"
+            $safeCount++
+            $cleanCount++
+        }
+
+        $summary += "$projectNumber. $($status.Name)"
+        $summary += "   Path: $($status.LocalPath)"
+        $summary += "   Branch: $($status.CurrentBranch)"
+        $summary += "   Local status: $($status.LocalStatus)"
+        $summary += "   Changes: $($status.ChangeCount)"
+        $summary += "   Remote match: $($status.RemoteMatch)"
+        $summary += "   Action allowed: $($status.ActionAllowed)"
+        $summary += "   Planned action: $plannedAction"
+        $summary += ""
+
+        $projectNumber++
+    }
+
+    $summary += "Summary"
+    $summary += "Safe projects: $safeCount"
+    $summary += "Blocked projects: $blockedCount"
+    $summary += "Clean projects: $cleanCount"
+    $summary += "Projects with local changes: $modifiedCount"
+    $summary += ""
+    $summary += "Phase 4.1 is preview only. Real Sync All will be implemented later in Phase 4.2."
+
+    $summaryText = $summary -join "`r`n"
+
+    Write-GuiLog -Message "Preview Sync All summary:`r`n$summaryText"
+
+    [void][System.Windows.Forms.MessageBox]::Show(
+        $summaryText,
+        "Preview Sync All",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+}
+
 [void]$form.ShowDialog()
+
 
 
 
