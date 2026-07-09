@@ -30,3 +30,7 @@ Desktop.ini
 # PowerShell transcripts
 PowerShell_transcript*.txt
 Transcript*.txt
+
+# Documentation backup/temp files
+*.backup_*
+Update-Docs-*.ps1
