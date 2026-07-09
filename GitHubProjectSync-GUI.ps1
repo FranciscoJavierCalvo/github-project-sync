@@ -43,6 +43,7 @@ $script:LogFolder = Join-Path -Path $script:ScriptRoot -ChildPath "logs"
 $script:Projects = @()
 $script:LastStatus = @()
 $script:GitAvailable = $false
+$script:ProjectRunState = @{}
 $script:LogFile = $null
 
 # GUI globals
@@ -593,6 +594,13 @@ function Refresh-List {
         [void]$item.SubItems.Add($status.AheadBehind)
         [void]$item.SubItems.Add($status.RemoteMatch)
         [void]$item.SubItems.Add($status.ActionAllowed)
+
+        $lastChecked = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $runState = Get-ProjectRunState -ProjectName $status.Name
+
+        [void]$item.SubItems.Add($lastChecked)
+        [void]$item.SubItems.Add($runState.LastAction)
+        [void]$item.SubItems.Add($runState.LastResult)
         [void]$item.SubItems.Add($status.RemoteUrl)
         [void]$item.SubItems.Add($status.LocalPath)
 
@@ -742,6 +750,10 @@ function Show-Details {
     $details += "Remote Match: $($status.RemoteMatch)"
     $details += "Has Conflicts: $($status.HasConflicts)"
     $details += "Action Allowed: $($status.ActionAllowed)"
+
+    $runState = Get-ProjectRunState -ProjectName $status.Name
+    $details += "Last Action: $($runState.LastAction)"
+    $details += "Last Result: $($runState.LastResult)"
     $details += "Message: $($status.Message)"
 
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -783,9 +795,11 @@ function Pull-SelectedProject {
 
     if ($result.Success) {
         Write-GuiLog -Message "Pull completed successfully for $($status.Name)."
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Pull Selected" -LastResult "Success"
     }
     else {
         Write-GuiLog -Message "Pull failed for $($status.Name)." -Level "ERROR"
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Pull Selected" -LastResult "Failed"
     }
 
     Refresh-List
@@ -828,6 +842,7 @@ function Commit-SelectedProject {
 
     if (Test-IsBlank -Value $porcelain.StdOut) {
         Write-GuiLog -Message "Commit skipped. No local changes detected."
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Commit Selected" -LastResult "Skipped - No Changes"
         return
     }
 
@@ -844,9 +859,11 @@ function Commit-SelectedProject {
 
     if ($commitResult.Success) {
         Write-GuiLog -Message "Commit completed successfully for $($status.Name)."
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Commit Selected" -LastResult "Success"
     }
     else {
         Write-GuiLog -Message "Commit failed for $($status.Name)." -Level "ERROR"
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Commit Selected" -LastResult "Failed"
     }
 
     Refresh-List
@@ -896,9 +913,11 @@ function Push-SelectedProject {
 
     if ($pushResult.Success) {
         Write-GuiLog -Message "Push completed successfully for $($status.Name)."
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Push Selected" -LastResult "Success"
     }
     else {
         Write-GuiLog -Message "Push failed for $($status.Name)." -Level "ERROR"
+        Set-ProjectRunState -ProjectName $status.Name -LastAction "Push Selected" -LastResult "Failed"
     }
 
     Refresh-List
@@ -911,7 +930,7 @@ function Push-SelectedProject {
 Initialize-Log
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "GitHub Project Sync Manager - Phase 5.1 Export Report"
+$form.Text = "GitHub Project Sync Manager - Phase 5.2 Last Action Tracking"
 $form.Size = New-Object System.Drawing.Size(1680, 880)
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = New-Object System.Drawing.Size(1450, 760)
@@ -1057,7 +1076,7 @@ $script:chkBlockPullWithChanges = $chkBlockPullWithChanges
 $lblSafety = New-Object System.Windows.Forms.Label
 $lblSafety.Location = New-Object System.Drawing.Point(12, 118)
 $lblSafety.Size = New-Object System.Drawing.Size(1380, 22)
-$lblSafety.Text = "Phase 5.1 safety: Export Report is read-only. No Git actions are executed by report export."
+$lblSafety.Text = "Phase 5.2 safety: Last action tracking is UI/reporting only. Git safety rules remain unchanged."
 $lblSafety.ForeColor = [System.Drawing.Color]::DarkGreen
 $lblSafety.Font = $fontBold
 $form.Controls.Add($lblSafety)
@@ -1081,6 +1100,9 @@ $lvProjects.HideSelection = $false
 [void]$lvProjects.Columns.Add("Ahead/Behind", 120)
 [void]$lvProjects.Columns.Add("Remote Match", 110)
 [void]$lvProjects.Columns.Add("Action Allowed", 170)
+[void]$lvProjects.Columns.Add("Last Checked", 150)
+[void]$lvProjects.Columns.Add("Last Action", 160)
+[void]$lvProjects.Columns.Add("Last Result", 150)
 [void]$lvProjects.Columns.Add("Origin Remote URL", 280)
 [void]$lvProjects.Columns.Add("Local Path", 450)
 
@@ -1177,7 +1199,7 @@ $lvProjects.Add_DoubleClick({
 
 $form.Add_Shown({
     Write-GuiLog -Message "GitHub Project Sync Manager started."
-    Write-GuiLog -Message "Phase: 5.1 - Export Report"
+    Write-GuiLog -Message "Phase: 5.2 - Last Action Tracking"
     Write-GuiLog -Message "Config path: $script:ConfigPath"
     Write-GuiLog -Message "Log file: $script:LogFile"
 
@@ -1372,6 +1394,7 @@ function Sync-SelectedProject {
 
     Write-GuiLog -Message "Sync push step completed successfully."
     Write-GuiLog -Message "Sync completed successfully for $($status.Name)."
+    Set-ProjectRunState -ProjectName $status.Name -LastAction "Sync Selected" -LastResult "Success"
 
     Refresh-List
 
@@ -1478,6 +1501,8 @@ function Preview-SyncAllProjects {
     $summaryText = $summary -join "`r`n"
 
     Write-GuiLog -Message "Preview Sync All summary:`r`n$summaryText"
+    foreach ($status in $script:LastStatus) { Set-ProjectRunState -ProjectName $status.Name -LastAction "Preview Sync All" -LastResult "Previewed" }
+    Refresh-List
 
     [void][System.Windows.Forms.MessageBox]::Show(
         $summaryText,
@@ -1762,6 +1787,7 @@ function Sync-AllProjects {
         else {
             $successCount++
             $results += "SUCCESS: $($status.Name)"
+            Set-ProjectRunState -ProjectName $status.Name -LastAction "Sync All" -LastResult "Success"
         }
     }
 
@@ -1917,6 +1943,8 @@ function Export-SyncReport {
     Set-Content -LiteralPath $reportPath -Value $report -Encoding UTF8
 
     Write-GuiLog -Message "Report exported to: $reportPath"
+    foreach ($status in $script:LastStatus) { Set-ProjectRunState -ProjectName $status.Name -LastAction "Export Report" -LastResult "Report Exported" }
+    Refresh-List
 
     [void][System.Windows.Forms.MessageBox]::Show(
         "Report exported successfully.`r`n`r`n$reportPath",
@@ -1926,7 +1954,59 @@ function Export-SyncReport {
     )
 }
 
+
+function Get-ProjectRunState {
+    param(
+        [string]$ProjectName
+    )
+
+    if ($null -eq $script:ProjectRunState) {
+        $script:ProjectRunState = @{}
+    }
+
+    if ($null -eq $ProjectName -or $ProjectName.Trim().Length -eq 0) {
+        return [PSCustomObject]@{
+            LastAction = ""
+            LastResult = ""
+        }
+    }
+
+    if ($script:ProjectRunState.ContainsKey($ProjectName)) {
+        return $script:ProjectRunState[$ProjectName]
+    }
+
+    return [PSCustomObject]@{
+        LastAction = ""
+        LastResult = ""
+    }
+}
+
+function Set-ProjectRunState {
+    param(
+        [string]$ProjectName,
+        [string]$LastAction,
+        [string]$LastResult
+    )
+
+    if ($null -eq $script:ProjectRunState) {
+        $script:ProjectRunState = @{}
+    }
+
+    if ($null -eq $ProjectName -or $ProjectName.Trim().Length -eq 0) {
+        return
+    }
+
+    $state = [PSCustomObject]@{
+        LastAction = $LastAction
+        LastResult = $LastResult
+    }
+
+    $script:ProjectRunState[$ProjectName] = $state
+}
+
 [void]$form.ShowDialog()
+
+
 
 
 
