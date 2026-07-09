@@ -911,7 +911,7 @@ function Push-SelectedProject {
 Initialize-Log
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "GitHub Project Sync Manager - Phase 2 Safe Manual Actions"
+$form.Text = "GitHub Project Sync Manager - Phase 3 Sync Selected"
 $form.Size = New-Object System.Drawing.Size(1480, 880)
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = New-Object System.Drawing.Size(1250, 760)
@@ -978,27 +978,32 @@ $btnPush.Location = New-Object System.Drawing.Point(532, 45)
 $btnPush.Size = New-Object System.Drawing.Size(120, 32)
 $btnPush.Text = "Push Selected"
 $form.Controls.Add($btnPush)
+$btnSync = New-Object System.Windows.Forms.Button
+$btnSync.Location = New-Object System.Drawing.Point(662, 45)
+$btnSync.Size = New-Object System.Drawing.Size(120, 32)
+$btnSync.Text = "Sync Selected"
+$form.Controls.Add($btnSync)
 
 $btnOpenFolder = New-Object System.Windows.Forms.Button
-$btnOpenFolder.Location = New-Object System.Drawing.Point(662, 45)
+$btnOpenFolder.Location = New-Object System.Drawing.Point(792, 45)
 $btnOpenFolder.Size = New-Object System.Drawing.Size(120, 32)
 $btnOpenFolder.Text = "Open Folder"
 $form.Controls.Add($btnOpenFolder)
 
 $btnOpenRepo = New-Object System.Windows.Forms.Button
-$btnOpenRepo.Location = New-Object System.Drawing.Point(792, 45)
+$btnOpenRepo.Location = New-Object System.Drawing.Point(922, 45)
 $btnOpenRepo.Size = New-Object System.Drawing.Size(140, 32)
 $btnOpenRepo.Text = "Open GitHub Repo"
 $form.Controls.Add($btnOpenRepo)
 
 $btnDetails = New-Object System.Windows.Forms.Button
-$btnDetails.Location = New-Object System.Drawing.Point(942, 45)
+$btnDetails.Location = New-Object System.Drawing.Point(1072, 45)
 $btnDetails.Size = New-Object System.Drawing.Size(100, 32)
 $btnDetails.Text = "Details"
 $form.Controls.Add($btnDetails)
 
 $btnClearLog = New-Object System.Windows.Forms.Button
-$btnClearLog.Location = New-Object System.Drawing.Point(1052, 45)
+$btnClearLog.Location = New-Object System.Drawing.Point(1182, 45)
 $btnClearLog.Size = New-Object System.Drawing.Size(100, 32)
 $btnClearLog.Text = "Clear Log"
 $form.Controls.Add($btnClearLog)
@@ -1036,7 +1041,7 @@ $script:chkBlockPullWithChanges = $chkBlockPullWithChanges
 $lblSafety = New-Object System.Windows.Forms.Label
 $lblSafety.Location = New-Object System.Drawing.Point(12, 118)
 $lblSafety.Size = New-Object System.Drawing.Size(1380, 22)
-$lblSafety.Text = "Phase 2 safety: selected-project only. No force push, reset hard, clean, branch switching, or automatic conflict resolution."
+$lblSafety.Text = "Phase 3 safety: selected-project sync only. No force push, reset hard, clean, branch switching, or automatic conflict resolution."
 $lblSafety.ForeColor = [System.Drawing.Color]::DarkGreen
 $lblSafety.Font = $fontBold
 $form.Controls.Add($lblSafety)
@@ -1115,6 +1120,9 @@ $btnCommit.Add_Click({
 $btnPush.Add_Click({
     Push-SelectedProject
 })
+$btnSync.Add_Click({
+    Sync-SelectedProject
+})
 
 $btnOpenFolder.Add_Click({
     Open-SelectedFolder
@@ -1143,7 +1151,7 @@ $lvProjects.Add_DoubleClick({
 
 $form.Add_Shown({
     Write-GuiLog -Message "GitHub Project Sync Manager started."
-    Write-GuiLog -Message "Phase: 2 - Safe Manual Actions"
+    Write-GuiLog -Message "Phase: 3 - Sync Selected"
     Write-GuiLog -Message "Config path: $script:ConfigPath"
     Write-GuiLog -Message "Log file: $script:LogFile"
 
@@ -1167,7 +1175,191 @@ $form.Add_Shown({
 # Start GUI
 # ------------------------------------------------------------
 
+
+function Sync-SelectedProject {
+    $status = Get-SelectedStatus
+
+    if ($null -eq $status) {
+        return
+    }
+
+    Write-GuiLog -Message "Sync Selected clicked for project: $($status.Name)"
+
+    if (-not (Test-SelectedProjectSafeForWrite -Status $status -ActionName "Sync")) {
+        return
+    }
+
+    $commitMessage = $script:txtCommitMessage.Text
+    $hasLocalChanges = $false
+
+    if ($status.ChangeCount -gt 0) {
+        $hasLocalChanges = $true
+    }
+
+    if ($hasLocalChanges -and (Test-IsBlank -Value $commitMessage)) {
+        Write-GuiLog -Message "Sync blocked. Local changes exist but commit message is blank." -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Local changes exist for the selected project.`r`n`r`nPlease enter a commit message before using Sync Selected.",
+            "Commit message required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    $plannedActions = @()
+
+    if ($hasLocalChanges) {
+        $plannedActions += "Commit local changes"
+    }
+    else {
+        $plannedActions += "Skip commit because no local changes were detected"
+    }
+
+    $plannedActions += "Pull latest changes using git pull --ff-only"
+    $plannedActions += "Push current branch to origin"
+
+    $summary = @()
+    $summary += "Sync selected project?"
+    $summary += ""
+    $summary += "Project: $($status.Name)"
+    $summary += "Path: $($status.LocalPath)"
+    $summary += "Branch: $($status.CurrentBranch)"
+    $summary += "Remote match: $($status.RemoteMatch)"
+    $summary += "Local status: $($status.LocalStatus)"
+    $summary += "Local changes: $($status.ChangeCount)"
+    $summary += "Action allowed: $($status.ActionAllowed)"
+    $summary += ""
+    $summary += "Planned actions:"
+
+    foreach ($plannedAction in $plannedActions) {
+        $summary += "- $plannedAction"
+    }
+
+    $summary += ""
+    $summary += "Safety rules:"
+    $summary += "- No force push"
+    $summary += "- No reset hard"
+    $summary += "- No git clean"
+    $summary += "- No branch switching"
+    $summary += "- No automatic conflict resolution"
+    $summary += "- Stop on first failure"
+    $summary += ""
+    $summary += "Continue?"
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        ($summary -join "`r`n"),
+        "Confirm Sync Selected",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-GuiLog -Message "Sync cancelled by user."
+        return
+    }
+
+    $branchName = $status.CurrentBranch
+
+    if ($hasLocalChanges) {
+        Write-GuiLog -Message "Sync step 1: checking local changes."
+
+        $statusResult = Invoke-GitCommand -WorkingDirectory $status.LocalPath -Arguments "status --porcelain" -LogCommand $true
+
+        if (-not $statusResult.Success) {
+            Write-GuiLog -Message "Sync failed. Could not check local status." -Level "ERROR"
+            Refresh-List
+            return
+        }
+
+        if (-not (Test-IsBlank -Value $statusResult.StdOut)) {
+            Write-GuiLog -Message "Sync step 2: staging local changes."
+
+            $addResult = Invoke-GitCommand -WorkingDirectory $status.LocalPath -Arguments "add ." -LogCommand $true
+
+            if (-not $addResult.Success) {
+                Write-GuiLog -Message "Sync failed. git add failed. Stopping before commit, pull, or push." -Level "ERROR"
+                Refresh-List
+                return
+            }
+
+            Write-GuiLog -Message "Sync step 3: committing local changes."
+
+            $safeMessage = Escape-GitMessage -Message $commitMessage
+            $commitResult = Invoke-GitCommand -WorkingDirectory $status.LocalPath -Arguments "commit -m `"$safeMessage`"" -LogCommand $true
+
+            if (-not $commitResult.Success) {
+                Write-GuiLog -Message "Sync failed. git commit failed. Stopping before pull or push." -Level "ERROR"
+                Refresh-List
+                return
+            }
+
+            Write-GuiLog -Message "Sync commit step completed successfully."
+        }
+        else {
+            Write-GuiLog -Message "No local changes detected at runtime. Commit step skipped."
+        }
+    }
+    else {
+        Write-GuiLog -Message "Sync commit step skipped. No local changes were detected."
+    }
+
+    Write-GuiLog -Message "Sync step 4: pulling latest changes with fast-forward only."
+
+    $pullResult = Invoke-GitCommand -WorkingDirectory $status.LocalPath -Arguments "pull --ff-only origin $branchName" -LogCommand $true
+
+    if (-not $pullResult.Success) {
+        Write-GuiLog -Message "Sync failed. Pull failed. Push was not attempted." -Level "ERROR"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Sync failed during pull.`r`n`r`nPush was not attempted.`r`n`r`nCheck the GUI log for details.",
+            "Sync failed",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+
+        Refresh-List
+        return
+    }
+
+    Write-GuiLog -Message "Sync pull step completed successfully."
+
+    Write-GuiLog -Message "Sync step 5: pushing current branch to origin."
+
+    $pushResult = Invoke-GitCommand -WorkingDirectory $status.LocalPath -Arguments "push origin $branchName" -LogCommand $true
+
+    if (-not $pushResult.Success) {
+        Write-GuiLog -Message "Sync failed. Push failed." -Level "ERROR"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Sync failed during push.`r`n`r`nCheck the GUI log for details.",
+            "Sync failed",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+
+        Refresh-List
+        return
+    }
+
+    Write-GuiLog -Message "Sync push step completed successfully."
+    Write-GuiLog -Message "Sync completed successfully for $($status.Name)."
+
+    Refresh-List
+
+    [void][System.Windows.Forms.MessageBox]::Show(
+        "Sync completed successfully.`r`n`r`nProject: $($status.Name)`r`nBranch: $branchName",
+        "Sync complete",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+}
+
 [void]$form.ShowDialog()
+
+
 
 
 
