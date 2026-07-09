@@ -1,0 +1,14 @@
+[
+  {
+    "Name": "Veeam Hyper-V Restore Test Tool",
+    "LocalPath": "C:\\Users\\francisco.calvo\\OneDrive - Wanstor\\Powershell\\GitHub Projects\\veeam-hyperv-restore-test-tool",
+    "RepoUrl": "https://github.com/FranciscoJavierCalvo/veeam-hyperv-restore-test-tool.git",
+    "DefaultBranch": "main"
+  },
+  {
+    "Name": "GitHub Project Sync Manager",
+    "LocalPath": "C:\\Users\\francisco.calvo\\OneDrive - Wanstor\\Powershell\\GitHub Projects\\github-project-sync",
+    "RepoUrl": "https://github.com/FranciscoJavierCalvo/github-project-sync.git",
+    "DefaultBranch": "main"
+  }
+]

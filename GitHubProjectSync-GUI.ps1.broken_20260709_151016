@@ -1,0 +1,812 @@
+#requires -version 5.1
+
+<#
+.SYNOPSIS
+    GitHub Project Sync Manager - Phase 1 Read-Only GUI
+
+.DESCRIPTION
+    This script loads a projects.json file containing local project folders mapped to GitHub repositories.
+    Phase 1 is read-only only. It checks folder status, Git repo status, branch, remote URL,
+    local changes, and remote match.
+
+    It does not commit, pull, push, reset, clean, or modify any repository.
+
+.DEFAULT CONFIG PATH
+    C:\Users\Francisco\OneDrive\GitHub Projects\github-project-sync\projects.json
+#>
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# ------------------------------------------------------------
+# Global settings
+# ------------------------------------------------------------
+
+$script:ConfigPath = 'C:\Users\Francisco\OneDrive\GitHub Projects\github-project-sync\projects.json'
+$script:BaseFolder = Split-Path -Path $script:ConfigPath -Parent
+$script:LogFolder = Join-Path -Path $script:BaseFolder -ChildPath 'logs'
+$script:Projects = @()
+$script:LastStatusResults = @()
+$script:GitAvailable = $false
+$script:LogFile = $null
+
+# ------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------
+
+function Test-IsBlank {
+    param(
+        [AllowNull()]
+        [string]$Value
+    )
+
+    if ($null -eq $Value) {
+        return $true
+    }
+
+    if (:IsNullOrWhiteSpace($Value)) {
+        return $true
+    }
+
+    return $false
+}
+
+function Initialize-Log {
+    if (-not (Test-Path -LiteralPath $script:LogFolder)) {
+        New-Item -Path $script:LogFolder -ItemType Directory -Force | Out-Null
+    }
+
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $script:LogFile = Join-Path -Path $script:LogFolder -ChildPath "GitHubProjectSync_$timestamp.log"
+
+    New-Item -Path $script:LogFile -ItemType File -Force | Out-Null
+}
+
+function Write-GuiLog {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [string]$Level = 'INFO'
+    )
+
+    $time = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$time] [$Level] $Message"
+
+    if ($null -ne $script:txtLog) {
+        $script:txtLog.AppendText($line + :NewLine)
+    }
+
+    if (-not (Test-IsBlank -Value $script:LogFile)) {
+        Add-Content -Path $script:LogFile -Value $line
+    }
+}
+
+function Test-GitInstalled {
+    try {
+        $gitCommand = Get-Command -Name 'git.exe' -ErrorAction SilentlyContinue
+
+        if ($null -eq $gitCommand) {
+            $gitCommand = Get-Command -Name 'git' -ErrorAction SilentlyContinue
+        }
+
+        if ($null -eq $gitCommand) {
+            return $false
+        }
+
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-GitReadOnlyCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkingDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Arguments
+    )
+
+    $result = [PSCustomObject]@{
+        Command  = "git $Arguments"
+        ExitCode = 999
+        StdOut   = ''
+        StdErr   = ''
+        Success  = $false
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $WorkingDirectory)) {
+            $result.StdErr = "Working directory does not exist: $WorkingDirectory"
+            return $result
+        }
+
+        $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $processInfo.FileName = 'git.exe'
+        $processInfo.Arguments = $Arguments
+        $processInfo.WorkingDirectory = $WorkingDirectory
+        $processInfo.UseShellExecute = $false
+        $processInfo.RedirectStandardOutput = $true
+        $processInfo.RedirectStandardError = $true
+        $processInfo.CreateNoWindow = $true
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $processInfo
+
+        [void]$process.Start()
+
+        $standardOutput = $process.StandardOutput.ReadToEnd()
+        $standardError = $process.StandardError.ReadToEnd()
+
+        $process.WaitForExit()
+
+        $result.ExitCode = $process.ExitCode
+        $result.StdOut = $standardOutput.Trim()
+        $result.StdErr = $standardError.Trim()
+
+        if ($process.ExitCode -eq 0) {
+            $result.Success = $true
+        }
+
+        return $result
+    }
+    catch {
+        $result.StdErr = $_.Exception.Message
+        return $result
+    }
+}
+
+function Normalize-RepoUrl {
+    param(
+        [AllowNull()]
+        [string]$RepoUrl
+    )
+
+    if (Test-IsBlank -Value $RepoUrl) {
+        return ''
+    }
+
+    $value = $RepoUrl.Trim()
+    $value = $value.Replace('\', '/')
+
+    if ($value -match '^git@([^:]+):(.+)$') {
+        $hostName = $matches[1]
+        $repoPath = $matches[2]
+        $value = "https://$hostName/$repoPath"
+    }
+
+    while ($value.EndsWith('/')) {
+        $value = $value.Substring(0, $value.Length - 1)
+    }
+
+    if ($value.ToLowerInvariant().EndsWith('.git')) {
+        $value = $value.Substring(0, $value.Length - 4)
+    }
+
+    return $value.ToLowerInvariant()
+}
+
+function ConvertTo-GitHubWebUrl {
+    param(
+        [AllowNull()]
+        [string]$RepoUrl
+    )
+
+    if (Test-IsBlank -Value $RepoUrl) {
+        return ''
+    }
+
+    $value = $RepoUrl.Trim()
+    $value = $value.Replace('\', '/')
+
+    if ($value -match '^git@([^:]+):(.+)$') {
+        $hostName = $matches[1]
+        $repoPath = $matches[2]
+        $value = "https://$hostName/$repoPath"
+    }
+
+    while ($value.EndsWith('/')) {
+        $value = $value.Substring(0, $value.Length - 1)
+    }
+
+    if ($value.ToLowerInvariant().EndsWith('.git')) {
+        $value = $value.Substring(0, $value.Length - 4)
+    }
+
+    return $value
+}
+
+function Load-ProjectsFromJson {
+    $script:Projects = @()
+
+    if (-not (Test-Path -LiteralPath $script:ConfigPath)) {
+        Write-GuiLog -Message "Config file not found: $script:ConfigPath" -Level 'WARN'
+        Write-GuiLog -Message 'Create projects.json first, then click Load Projects again.' -Level 'WARN'
+        return
+    }
+
+    try {
+        $jsonContent = Get-Content -Path $script:ConfigPath -Raw -ErrorAction Stop
+
+        if (Test-IsBlank -Value $jsonContent) {
+            Write-GuiLog -Message "Config file is empty: $script:ConfigPath" -Level 'ERROR'
+            return
+        }
+
+        $loadedProjects = $jsonContent | ConvertFrom-Json -ErrorAction Stop
+
+        if ($null -eq $loadedProjects) {
+            Write-GuiLog -Message 'No projects found in JSON file.' -Level 'WARN'
+            return
+        }
+
+        $projectArray = @($loadedProjects)
+
+        foreach ($project in $projectArray) {
+            $name = ''
+            $localPath = ''
+            $repoUrl = ''
+            $defaultBranch = ''
+
+            if ($null -ne $project.Name) {
+                $name = [string]$project.Name
+            }
+
+            if ($null -ne $project.LocalPath) {
+                $localPath = [string]$project.LocalPath
+            }
+
+            if ($null -ne $project.RepoUrl) {
+                $repoUrl = [string]$project.RepoUrl
+            }
+
+            if ($null -ne $project.DefaultBranch) {
+                $defaultBranch = [string]$project.DefaultBranch
+            }
+
+            if (Test-IsBlank -Value $name) {
+                $name = Split-Path -Path $localPath -Leaf
+            }
+
+            if (Test-IsBlank -Value $defaultBranch) {
+                $defaultBranch = 'main'
+            }
+
+            $cleanProject = [PSCustomObject]@{
+                Name          = $name
+                LocalPath     = $localPath
+                RepoUrl       = $repoUrl
+                DefaultBranch = $defaultBranch
+            }
+
+            $script:Projects += $cleanProject
+        }
+
+        Write-GuiLog -Message "Loaded $($script:Projects.Count) project(s) from: $script:ConfigPath"
+    }
+    catch {
+        Write-GuiLog -Message "Failed to load projects.json. Error: $($_.Exception.Message)" -Level 'ERROR'
+    }
+}
+
+function Get-ProjectGitStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Project
+    )
+
+    $status = [PSCustomObject]@{
+        Name            = $Project.Name
+        LocalPath       = $Project.LocalPath
+        ConfigRepoUrl   = $Project.RepoUrl
+        DefaultBranch   = $Project.DefaultBranch
+        FolderStatus    = 'Unknown'
+        GitRepoStatus   = 'Unknown'
+        CurrentBranch   = ''
+        RemoteUrl       = ''
+        RemoteMatch     = 'Unknown'
+        LocalStatus     = 'Unknown'
+        ChangeCount     = 0
+        AheadBehind     = ''
+        Message         = ''
+        Project         = $Project
+    }
+
+    if (Test-IsBlank -Value $Project.LocalPath) {
+        $status.FolderStatus = 'Missing Path'
+        $status.GitRepoStatus = 'Skipped'
+        $status.LocalStatus = 'Error'
+        $status.Message = 'LocalPath is empty in projects.json.'
+        return $status
+    }
+
+    if (-not (Test-Path -LiteralPath $Project.LocalPath)) {
+        $status.FolderStatus = 'Missing'
+        $status.GitRepoStatus = 'Skipped'
+        $status.LocalStatus = 'Error'
+        $status.Message = "Folder does not exist: $($Project.LocalPath)"
+        return $status
+    }
+
+    $status.FolderStatus = 'OK'
+
+    if (-not $script:GitAvailable) {
+        $status.GitRepoStatus = 'Skipped'
+        $status.LocalStatus = 'Error'
+        $status.Message = 'Git is not installed or not available in PATH.'
+        return $status
+    }
+
+    $insideRepo = Invoke-GitReadOnlyCommand -WorkingDirectory $Project.LocalPath -Arguments 'rev-parse --is-inside-work-tree'
+
+    if (-not $insideRepo.Success) {
+        $status.GitRepoStatus = 'Not Git Repo'
+        $status.LocalStatus = 'Error'
+        $status.Message = $insideRepo.StdErr
+        return $status
+    }
+
+    if ($insideRepo.StdOut -ne 'true') {
+        $status.GitRepoStatus = 'Not Git Repo'
+        $status.LocalStatus = 'Error'
+        $status.Message = 'Folder is not inside a Git working tree.'
+        return $status
+    }
+
+    $status.GitRepoStatus = 'OK'
+
+    $branchResult = Invoke-GitReadOnlyCommand -WorkingDirectory $Project.LocalPath -Arguments 'rev-parse --abbrev-ref HEAD'
+
+    if ($branchResult.Success) {
+        $status.CurrentBranch = $branchResult.StdOut
+    }
+    else {
+        $status.CurrentBranch = 'Unknown'
+    }
+
+    $remoteResult = Invoke-GitReadOnlyCommand -WorkingDirectory $Project.LocalPath -Arguments 'remote get-url origin'
+
+    if ($remoteResult.Success) {
+        $status.RemoteUrl = $remoteResult.StdOut
+    }
+    else {
+        $status.RemoteUrl = ''
+    }
+
+    $configuredRemote = Normalize-RepoUrl -RepoUrl $Project.RepoUrl
+    $actualRemote = Normalize-RepoUrl -RepoUrl $status.RemoteUrl
+
+    if ((Test-IsBlank -Value $configuredRemote) -and (Test-IsBlank -Value $actualRemote)) {
+        $status.RemoteMatch = 'No Remote'
+    }
+    elseif (Test-IsBlank -Value $configuredRemote) {
+        $status.RemoteMatch = 'No Config'
+    }
+    elseif (Test-IsBlank -Value $actualRemote) {
+        $status.RemoteMatch = 'Missing Origin'
+    }
+    elseif ($configuredRemote -eq $actualRemote) {
+        $status.RemoteMatch = 'Yes'
+    }
+    else {
+        $status.RemoteMatch = 'No'
+    }
+
+    $statusResult = Invoke-GitReadOnlyCommand -WorkingDirectory $Project.LocalPath -Arguments 'status --porcelain'
+
+    if ($statusResult.Success) {
+        if (Test-IsBlank -Value $statusResult.StdOut) {
+            $status.LocalStatus = 'Clean'
+            $status.ChangeCount = 0
+        }
+        else {
+            $lines = $statusResult.StdOut -split "`r?`n"
+            $status.ChangeCount = @($lines | Where-Object { -not (Test-IsBlank -Value $_) }).Count
+            $status.LocalStatus = 'Modified'
+        }
+    }
+    else {
+        $status.LocalStatus = 'Error'
+        $status.Message = $statusResult.StdErr
+    }
+
+    $shortStatusResult = Invoke-GitReadOnlyCommand -WorkingDirectory $Project.LocalPath -Arguments 'status -sb'
+
+    if ($shortStatusResult.Success) {
+        $shortLines = $shortStatusResult.StdOut -split "`r?`n"
+
+        if ($shortLines.Count -gt 0) {
+            $firstLine = $shortLines[0]
+
+            if ($firstLine -match '\[(.+)\]') {
+                $status.AheadBehind = $matches[1]
+            }
+        }
+    }
+
+    if (Test-IsBlank -Value $status.Message) {
+        $status.Message = 'OK'
+    }
+
+    return $status
+}
+
+function Refresh-ProjectList {
+    $script:lvProjects.Items.Clear()
+    $script:LastStatusResults = @()
+
+    if ($script:Projects.Count -eq 0) {
+        Write-GuiLog -Message 'No projects loaded. Click Load Projects first.' -Level 'WARN'
+        return
+    }
+
+    Write-GuiLog -Message 'Checking project status...'
+
+    foreach ($project in $script:Projects) {
+        Write-GuiLog -Message "Checking: $($project.Name)"
+
+        $status = Get-ProjectGitStatus -Project $project
+        $script:LastStatusResults += $status
+
+        $item = New-Object System.Windows.Forms.ListViewItem($status.Name)
+        $item.SubItems.Add($status.FolderStatus) | Out-Null
+        $item.SubItems.Add($status.GitRepoStatus) | Out-Null
+        $item.SubItems.Add($status.CurrentBranch) | Out-Null
+        $item.SubItems.Add($status.DefaultBranch) | Out-Null
+        $item.SubItems.Add($status.LocalStatus) | Out-Null
+        $item.SubItems.Add([string]$status.ChangeCount) | Out-Null
+        $item.SubItems.Add($status.AheadBehind) | Out-Null
+        $item.SubItems.Add($status.RemoteMatch) | Out-Null
+        $item.SubItems.Add($status.RemoteUrl) | Out-Null
+        $item.SubItems.Add($status.LocalPath) | Out-Null
+
+        $item.Tag = $status
+
+        if ($status.LocalStatus -eq 'Clean' -and $status.RemoteMatch -eq 'Yes') {
+            $item.BackColor = [System.Drawing.Color]::FromArgb(220, 255, 220)
+        }
+        elseif ($status.LocalStatus -eq 'Modified') {
+            $item.BackColor = [System.Drawing.Color]::FromArgb(255, 245, 200)
+        }
+        elseif ($status.LocalStatus -eq 'Error') {
+            $item.BackColor = [System.Drawing.Color]::FromArgb(255, 220, 220)
+        }
+        elseif ($status.RemoteMatch -eq 'No') {
+            $item.BackColor = [System.Drawing.Color]::FromArgb(255, 230, 210)
+        }
+
+        $script:lvProjects.Items.Add($item) | Out-Null
+
+        if ($status.Message -ne 'OK') {
+            Write-GuiLog -Message "$($project.Name): $($status.Message)" -Level 'WARN'
+        }
+    }
+
+    Write-GuiLog -Message 'Project status check completed.'
+}
+
+function Get-SelectedProjectStatus {
+    if ($script:lvProjects.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            'Please select a project first.',
+            'No project selected',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+
+        return $null
+    }
+
+    return $script:lvProjects.SelectedItems[0].Tag
+}
+
+function Open-SelectedProjectFolder {
+    $selectedStatus = Get-SelectedProjectStatus
+
+    if ($null -eq $selectedStatus) {
+        return
+    }
+
+    $path = $selectedStatus.LocalPath
+
+    if (Test-IsBlank -Value $path) {
+        Write-GuiLog -Message 'Selected project has no LocalPath configured.' -Level 'WARN'
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-GuiLog -Message "Folder does not exist: $path" -Level 'ERROR'
+        return
+    }
+
+    Write-GuiLog -Message "Opening folder: $path"
+
+    Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$path`""
+}
+
+function Open-SelectedGitHubRepo {
+    $selectedStatus = Get-SelectedProjectStatus
+
+    if ($null -eq $selectedStatus) {
+        return
+    }
+
+    $repoUrl = $selectedStatus.ConfigRepoUrl
+
+    if (Test-IsBlank -Value $repoUrl) {
+        $repoUrl = $selectedStatus.RemoteUrl
+    }
+
+    if (Test-IsBlank -Value $repoUrl) {
+        Write-GuiLog -Message 'Selected project has no RepoUrl or origin remote URL.' -Level 'WARN'
+        return
+    }
+
+    $webUrl = ConvertTo-GitHubWebUrl -RepoUrl $repoUrl
+
+    Write-GuiLog -Message "Opening GitHub repo: $webUrl"
+
+    Start-Process -FilePath $webUrl
+}
+
+function Show-SelectedDetails {
+    $selectedStatus = Get-SelectedProjectStatus
+
+    if ($null -eq $selectedStatus) {
+        return
+    }
+
+    $details = @()
+    $details += "Name: $($selectedStatus.Name)"
+    $details += "Local Path: $($selectedStatus.LocalPath)"
+    $details += "Configured Repo URL: $($selectedStatus.ConfigRepoUrl)"
+    $details += "Actual Origin URL: $($selectedStatus.RemoteUrl)"
+    $details += "Default Branch: $($selectedStatus.DefaultBranch)"
+    $details += "Current Branch: $($selectedStatus.CurrentBranch)"
+    $details += "Folder Status: $($selectedStatus.FolderStatus)"
+    $details += "Git Repo Status: $($selectedStatus.GitRepoStatus)"
+    $details += "Local Status: $($selectedStatus.LocalStatus)"
+    $details += "Change Count: $($selectedStatus.ChangeCount)"
+    $details += "Ahead/Behind: $($selectedStatus.AheadBehind)"
+    $details += "Remote Match: $($selectedStatus.RemoteMatch)"
+    $details += "Message: $($selectedStatus.Message)"
+
+    [System.Windows.Forms.MessageBox]::Show(
+        ($details -join :NewLine),
+        'Project Details',
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+}
+
+function Create-SampleConfigIfMissing {
+    if (Test-Path -LiteralPath $script:ConfigPath) {
+        Write-GuiLog -Message "Config file already exists: $script:ConfigPath"
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $script:BaseFolder)) {
+        New-Item -Path $script:BaseFolder -ItemType Directory -Force | Out-Null
+    }
+
+    $sampleJson = @'
+[
+  {
+    "Name": "Veeam Hyper-V Restore Test Tool",
+    "LocalPath": "C:\\Users\\Francisco\\OneDrive\\GitHub Projects\\veeam-hyperv-restore-test-tool",
+    "RepoUrl": "https://github.com/YOUR-GITHUB-USERNAME/veeam-hyperv-restore-test-tool.git",
+    "DefaultBranch": "main"
+  }
+]
+'@
+
+    Set-Content -Path $script:ConfigPath -Value $sampleJson -Encoding UTF8
+
+    Write-GuiLog -Message "Created sample config file: $script:ConfigPath" -Level 'WARN'
+    Write-GuiLog -Message 'Please edit RepoUrl before using it for real status checks.' -Level 'WARN'
+}
+
+# ------------------------------------------------------------
+# GUI creation
+# ------------------------------------------------------------
+
+Initialize-Log
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'GitHub Project Sync Manager - Phase 1 Read-Only'
+$form.Size = New-Object System.Drawing.Size(1400, 820)
+$form.StartPosition = 'CenterScreen'
+$form.MinimumSize = New-Object System.Drawing.Size(1200, 700)
+
+$fontDefault = New-Object System.Drawing.Font('Segoe UI', 9)
+$fontBold = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+$form.Font = $fontDefault
+
+$lblConfig = New-Object System.Windows.Forms.Label
+$lblConfig.Location = New-Object System.Drawing.Point(12, 12)
+$lblConfig.Size = New-Object System.Drawing.Size(120, 22)
+$lblConfig.Text = 'Config file:'
+$lblConfig.Font = $fontBold
+$form.Controls.Add($lblConfig)
+
+$txtConfigPath = New-Object System.Windows.Forms.TextBox
+$txtConfigPath.Location = New-Object System.Drawing.Point(135, 10)
+$txtConfigPath.Size = New-Object System.Drawing.Size(980, 24)
+$txtConfigPath.Text = $script:ConfigPath
+$txtConfigPath.ReadOnly = $true
+$form.Controls.Add($txtConfigPath)
+
+$btnCreateSample = New-Object System.Windows.Forms.Button
+$btnCreateSample.Location = New-Object System.Drawing.Point(1125, 8)
+$btnCreateSample.Size = New-Object System.Drawing.Size(120, 28)
+$btnCreateSample.Text = 'Create Sample'
+$form.Controls.Add($btnCreateSample)
+
+$btnExit = New-Object System.Windows.Forms.Button
+$btnExit.Location = New-Object System.Drawing.Point(1255, 8)
+$btnExit.Size = New-Object System.Drawing.Size(100, 28)
+$btnExit.Text = 'Exit'
+$form.Controls.Add($btnExit)
+
+$btnLoad = New-Object System.Windows.Forms.Button
+$btnLoad.Location = New-Object System.Drawing.Point(12, 45)
+$btnLoad.Size = New-Object System.Drawing.Size(120, 32)
+$btnLoad.Text = 'Load Projects'
+$form.Controls.Add($btnLoad)
+
+$btnCheck = New-Object System.Windows.Forms.Button
+$btnCheck.Location = New-Object System.Drawing.Point(142, 45)
+$btnCheck.Size = New-Object System.Drawing.Size(120, 32)
+$btnCheck.Text = 'Check Status'
+$form.Controls.Add($btnCheck)
+
+$btnOpenFolder = New-Object System.Windows.Forms.Button
+$btnOpenFolder.Location = New-Object System.Drawing.Point(272, 45)
+$btnOpenFolder.Size = New-Object System.Drawing.Size(120, 32)
+$btnOpenFolder.Text = 'Open Folder'
+$form.Controls.Add($btnOpenFolder)
+
+$btnOpenRepo = New-Object System.Windows.Forms.Button
+$btnOpenRepo.Location = New-Object System.Drawing.Point(402, 45)
+$btnOpenRepo.Size = New-Object System.Drawing.Size(140, 32)
+$btnOpenRepo.Text = 'Open GitHub Repo'
+$form.Controls.Add($btnOpenRepo)
+
+$btnDetails = New-Object System.Windows.Forms.Button
+$btnDetails.Location = New-Object System.Drawing.Point(552, 45)
+$btnDetails.Size = New-Object System.Drawing.Size(120, 32)
+$btnDetails.Text = 'Details'
+$form.Controls.Add($btnDetails)
+
+$btnClearLog = New-Object System.Windows.Forms.Button
+$btnClearLog.Location = New-Object System.Drawing.Point(682, 45)
+$btnClearLog.Size = New-Object System.Drawing.Size(120, 32)
+$btnClearLog.Text = 'Clear Log'
+$form.Controls.Add($btnClearLog)
+
+$lblSafety = New-Object System.Windows.Forms.Label
+$lblSafety.Location = New-Object System.Drawing.Point(825, 50)
+$lblSafety.Size = New-Object System.Drawing.Size(520, 24)
+$lblSafety.Text = 'Phase 1 is read-only. No commit, pull, push, reset, or clean commands are used.'
+$lblSafety.ForeColor = [System.Drawing.Color]::DarkGreen
+$lblSafety.Font = $fontBold
+$form.Controls.Add($lblSafety)
+
+$lvProjects = New-Object System.Windows.Forms.ListView
+$lvProjects.Location = New-Object System.Drawing.Point(12, 90)
+$lvProjects.Size = New-Object System.Drawing.Size(1345, 405)
+$lvProjects.View = [System.Windows.Forms.View]::Details
+$lvProjects.FullRowSelect = $true
+$lvProjects.GridLines = $true
+$lvProjects.MultiSelect = $false
+$lvProjects.HideSelection = $false
+
+[void]$lvProjects.Columns.Add('Project Name', 230)
+[void]$lvProjects.Columns.Add('Folder', 85)
+[void]$lvProjects.Columns.Add('Git Repo', 95)
+[void]$lvProjects.Columns.Add('Current Branch', 120)
+[void]$lvProjects.Columns.Add('Default Branch', 120)
+[void]$lvProjects.Columns.Add('Local Status', 100)
+[void]$lvProjects.Columns.Add('Changes', 70)
+[void]$lvProjects.Columns.Add('Ahead/Behind', 120)
+[void]$lvProjects.Columns.Add('Remote Match', 110)
+[void]$lvProjects.Columns.Add('Origin Remote URL', 260)
+[void]$lvProjects.Columns.Add('Local Path', 430)
+
+$form.Controls.Add($lvProjects)
+$script:lvProjects = $lvProjects
+
+$lblLog = New-Object System.Windows.Forms.Label
+$lblLog.Location = New-Object System.Drawing.Point(12, 505)
+$lblLog.Size = New-Object System.Drawing.Size(120, 22)
+$lblLog.Text = 'Log:'
+$lblLog.Font = $fontBold
+$form.Controls.Add($lblLog)
+
+$txtLog = New-Object System.Windows.Forms.TextBox
+$txtLog.Location = New-Object System.Drawing.Point(12, 530)
+$txtLog.Size = New-Object System.Drawing.Size(1345, 230)
+$txtLog.Multiline = $true
+$txtLog.ScrollBars = 'Vertical'
+$txtLog.ReadOnly = $true
+$txtLog.Font = New-Object System.Drawing.Font('Consolas', 9)
+$form.Controls.Add($txtLog)
+$script:txtLog = $txtLog
+
+# ------------------------------------------------------------
+# Event handlers
+# ------------------------------------------------------------
+
+$btnCreateSample.Add_Click({
+    Create-SampleConfigIfMissing
+})
+
+$btnLoad.Add_Click({
+    Load-ProjectsFromJson
+    Refresh-ProjectList
+})
+
+$btnCheck.Add_Click({
+    if ($script:Projects.Count -eq 0) {
+        Load-ProjectsFromJson
+    }
+
+    Refresh-ProjectList
+})
+
+$btnOpenFolder.Add_Click({
+    Open-SelectedProjectFolder
+})
+
+$btnOpenRepo.Add_Click({
+    Open-SelectedGitHubRepo
+})
+
+$btnDetails.Add_Click({
+    Show-SelectedDetails
+})
+
+$btnClearLog.Add_Click({
+    $script:txtLog.Clear()
+    Write-GuiLog -Message 'Log cleared.'
+})
+
+$btnExit.Add_Click({
+    $form.Close()
+})
+
+$lvProjects.Add_DoubleClick({
+    Show-SelectedDetails
+})
+
+$form.Add_Shown({
+    Write-GuiLog -Message 'GitHub Project Sync Manager started.'
+    Write-GuiLog -Message "Config path: $script:ConfigPath"
+    Write-GuiLog -Message "Log file: $script:LogFile"
+
+    $script:GitAvailable = Test-GitInstalled
+
+    if ($script:GitAvailable) {
+        Write-GuiLog -Message 'Git detected successfully.'
+    }
+    else {
+        Write-GuiLog -Message 'Git was not found in PATH. Install Git or check PATH.' -Level 'ERROR'
+    }
+
+    Load-ProjectsFromJson
+
+    if ($script:Projects.Count -gt 0) {
+        Refresh-ProjectList
+    }
+})
+
+# ------------------------------------------------------------
+# Start GUI
+# ------------------------------------------------------------
+
+[void]$form.ShowDialog()
+
+
