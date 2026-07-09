@@ -1,0 +1,8 @@
+[
+  {
+    "Name": "Example Project",
+    "LocalPath": "C:\\Path\\To\\ExampleProject",
+    "RepoUrl": "https://github.com/YourUser/example-project.git",
+    "DefaultBranch": "main"
+  }
+]

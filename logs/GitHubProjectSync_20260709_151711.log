@@ -1,8 +1,0 @@
-[2026-07-09 15:17:11] [INFO] GitHub Project Sync Manager started.
-[2026-07-09 15:17:11] [INFO] Config path: C:\Users\francisco.calvo\OneDrive - Wanstor\Powershell\GitHub Projects\github-project-sync\projects.json
-[2026-07-09 15:17:11] [INFO] Log file: C:\Users\francisco.calvo\OneDrive - Wanstor\Powershell\GitHub Projects\github-project-sync\logs\GitHubProjectSync_20260709_151711.log
-[2026-07-09 15:17:11] [INFO] Git detected successfully.
-[2026-07-09 15:17:11] [INFO] Loaded 2 project(s).
-[2026-07-09 15:17:11] [INFO] Checking project status...
-[2026-07-09 15:17:12] [WARN] GitHub Project Sync Manager: fatal: not a git repository (or any of the parent directories): .git
-[2026-07-09 15:17:12] [INFO] Status check completed.

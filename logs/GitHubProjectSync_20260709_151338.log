@@ -1,9 +1,0 @@
-[2026-07-09 15:13:38] [INFO] GitHub Project Sync Manager started.
-[2026-07-09 15:13:38] [INFO] Config path: C:\Users\francisco.calvo\OneDrive - Wanstor\Powershell\GitHub Projects\github-project-sync\projects.json
-[2026-07-09 15:13:38] [INFO] Log file: C:\Users\francisco.calvo\OneDrive - Wanstor\Powershell\GitHub Projects\github-project-sync\logs\GitHubProjectSync_20260709_151338.log
-[2026-07-09 15:13:38] [INFO] Git detected successfully.
-[2026-07-09 15:13:38] [INFO] Loaded 2 project(s).
-[2026-07-09 15:13:38] [INFO] Checking project status...
-[2026-07-09 15:13:38] [WARN] Veeam Hyper-V Restore Test Tool: Folder does not exist.
-[2026-07-09 15:13:38] [WARN] GitHub Project Sync Manager: Folder does not exist.
-[2026-07-09 15:13:38] [INFO] Status check completed.

@@ -1,0 +1,32 @@
+# Local configuration
+projects.json
+
+# Logs
+logs/
+*.log
+
+# Backup and repair files
+*.bak
+*.bak_*
+*.broken_*
+*.pathfix_*
+*.fontfix_*
+*.ps1.bak_*
+*.ps1.broken_*
+*.ps1.pathfix_*
+*.ps1.fontfix_*
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+scratch/
+test-output/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# PowerShell transcripts
+PowerShell_transcript*.txt
+Transcript*.txt

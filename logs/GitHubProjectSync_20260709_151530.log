@@ -1,7 +1,0 @@
-[2026-07-09 15:15:30] [INFO] GitHub Project Sync Manager started.
-[2026-07-09 15:15:30] [INFO] Config path: C:\Users\francisco.calvo\OneDrive - Wanstor\Powershell\GitHub Projects\github-project-sync\projects.json
-[2026-07-09 15:15:30] [INFO] Log file: C:\Users\francisco.calvo\OneDrive - Wanstor\Powershell\GitHub Projects\github-project-sync\logs\GitHubProjectSync_20260709_151530.log
-[2026-07-09 15:15:30] [INFO] Git detected successfully.
-[2026-07-09 15:15:30] [ERROR] Failed to load JSON: Conversion from JSON failed with error: Bad JSON escape sequence: \U. Path '[0].LocalPath', line 4, position 22.
-[2026-07-09 15:15:38] [ERROR] Failed to load JSON: Conversion from JSON failed with error: Bad JSON escape sequence: \U. Path '[0].LocalPath', line 4, position 22.
-[2026-07-09 15:15:38] [WARN] No projects loaded.
