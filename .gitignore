@@ -37,3 +37,15 @@ Update-Docs-*.ps1
 
 # Generated reports
 reports/
+
+# Local runtime/config files
+
+# Local cleanup/archive
+_local_cleanup_archive/
+
+# Backup and patch files
+*.backup
+*.broken*
+Apply-Phase*.ps1
+Add-Phase*.ps1
+Finalize-GitHubProjectSyncProject.ps1

@@ -39,6 +39,14 @@ else {
 }
 
 $script:ConfigPath = Join-Path -Path $script:ScriptRoot -ChildPath "projects.json"
+
+# Phase 6 defaults
+# The projects root is assumed to be the parent folder of this tool folder.
+# Example:
+#   Tool folder:     C:\Users\Francisco\OneDrive\GitHub Projects\github-project-sync
+#   Projects root:   C:\Users\Francisco\OneDrive\GitHub Projects
+$script:ProjectsRoot = Split-Path -Path $script:ScriptRoot -Parent
+$script:DefaultGitHubOwner = ""
 $script:LogFolder = Join-Path -Path $script:ScriptRoot -ChildPath "logs"
 $script:Projects = @()
 $script:LastStatus = @()
@@ -53,6 +61,7 @@ $script:txtLog = $null
 $script:txtCommitMessage = $null
 $script:chkConfirmPush = $null
 $script:chkBlockPullWithChanges = $null
+$script:txtNewProjectName = $null
 
 # ------------------------------------------------------------
 # Helper functions
@@ -302,6 +311,1210 @@ function Create-SampleConfig {
 
     Write-GuiLog -Message "Created sample config: $script:ConfigPath" -Level "WARN"
 }
+
+
+function Test-GitHubCliInstalled {
+    try {
+        $cmd = Get-Command -Name "gh.exe" -ErrorAction SilentlyContinue
+
+        if ($null -eq $cmd) {
+            $cmd = Get-Command -Name "gh" -ErrorAction SilentlyContinue
+        }
+
+        if ($null -eq $cmd) {
+            return $false
+        }
+
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-GhCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Arguments,
+
+        [bool]$LogCommand = $true
+    )
+
+    $result = New-Object PSObject -Property @{
+        Success = $false
+        ExitCode = 999
+        StdOut = ""
+        StdErr = ""
+        Command = "gh $Arguments"
+    }
+
+    try {
+        if ($LogCommand) {
+            Write-GuiLog -Message "Command: gh $Arguments"
+        }
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "gh.exe"
+        $psi.Arguments = $Arguments
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+
+        [void]$process.Start()
+
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+
+        $process.WaitForExit()
+
+        $result.ExitCode = $process.ExitCode
+        $result.StdOut = $stdout.Trim()
+        $result.StdErr = $stderr.Trim()
+
+        if ($process.ExitCode -eq 0) {
+            $result.Success = $true
+        }
+
+        if ($LogCommand) {
+            Write-GuiLog -Message "Exit code: $($result.ExitCode)"
+
+            if (-not (Test-IsBlank -Value $result.StdOut)) {
+                Write-GuiLog -Message "STDOUT:`r`n$($result.StdOut)"
+            }
+
+            if (-not (Test-IsBlank -Value $result.StdErr)) {
+                Write-GuiLog -Message "STDERR:`r`n$($result.StdErr)" -Level "WARN"
+            }
+        }
+    }
+    catch {
+        $result.StdErr = $_.Exception.Message
+
+        if ($LogCommand) {
+            Write-GuiLog -Message "GitHub CLI command failed: $($_.Exception.Message)" -Level "ERROR"
+        }
+    }
+
+    return $result
+}
+
+function Get-DefaultGitHubOwner {
+    if (-not (Test-IsBlank -Value $script:DefaultGitHubOwner)) {
+        return $script:DefaultGitHubOwner
+    }
+
+    foreach ($project in $script:Projects) {
+        if ($null -ne $project.RepoUrl) {
+            $repoUrl = [string]$project.RepoUrl
+
+            if ($repoUrl -match "github\.com[:/]+([^/]+)/") {
+                return $matches[1]
+            }
+        }
+    }
+
+    if (Test-Path -LiteralPath $script:ConfigPath) {
+        try {
+            $json = Get-Content -LiteralPath $script:ConfigPath -Raw
+
+            if (-not (Test-IsBlank -Value $json)) {
+                if ($json -match "github\.com[:/]+([^/]+)/") {
+                    return $matches[1]
+                }
+            }
+        }
+        catch {
+            return ""
+        }
+    }
+
+    return ""
+}
+
+function Test-ProjectNameIsValid {
+    param(
+        [AllowNull()]
+        [string]$ProjectName
+    )
+
+    if (Test-IsBlank -Value $ProjectName) {
+        return $false
+    }
+
+    if ($ProjectName -notmatch "^[A-Za-z0-9._-]+$") {
+        return $false
+    }
+
+    if ($ProjectName.StartsWith(".")) {
+        return $false
+    }
+
+    if ($ProjectName.EndsWith(".")) {
+        return $false
+    }
+
+    return $true
+}
+
+function Save-ProjectsConfig {
+    try {
+        $rows = @()
+
+        foreach ($project in $script:Projects) {
+            $rows += [PSCustomObject]@{
+                Name = $project.Name
+                LocalPath = $project.LocalPath
+                RepoUrl = $project.RepoUrl
+                DefaultBranch = $project.DefaultBranch
+            }
+        }
+
+        $json = $rows | ConvertTo-Json -Depth 5
+        Set-Content -LiteralPath $script:ConfigPath -Value $json -Encoding UTF8
+
+        Write-GuiLog -Message "projects.json updated successfully."
+        return $true
+    }
+    catch {
+        Write-GuiLog -Message "Failed to save projects.json: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    }
+}
+
+function Test-ProjectAlreadyConfigured {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LocalPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoUrl
+    )
+
+    $targetRepo = Normalize-RepoUrl -RepoUrl $RepoUrl
+
+    foreach ($project in $script:Projects) {
+        $existingName = ""
+        $existingPath = ""
+        $existingRepo = ""
+
+        if ($null -ne $project.Name) {
+            $existingName = [string]$project.Name
+        }
+
+        if ($null -ne $project.LocalPath) {
+            $existingPath = [string]$project.LocalPath
+        }
+
+        if ($null -ne $project.RepoUrl) {
+            $existingRepo = Normalize-RepoUrl -RepoUrl ([string]$project.RepoUrl)
+        }
+
+        if ($existingName.ToLower() -eq $ProjectName.ToLower()) {
+            return $true
+        }
+
+        if ($existingPath.ToLower() -eq $LocalPath.ToLower()) {
+            return $true
+        }
+
+        if (-not (Test-IsBlank -Value $existingRepo)) {
+            if ($existingRepo -eq $targetRepo) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Show-NewProjectDialog {
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = "New GitHub Project"
+    $dialog.Size = New-Object System.Drawing.Size(620, 310)
+    $dialog.StartPosition = "CenterParent"
+    $dialog.FormBorderStyle = "FixedDialog"
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+
+    $fontDefault = New-Object System.Drawing.Font -ArgumentList "Segoe UI", ([single]9)
+    $fontBold = New-Object System.Drawing.Font -ArgumentList "Segoe UI", ([single]9), ([System.Drawing.FontStyle]::Bold)
+    $dialog.Font = $fontDefault
+
+    $lblProjectName = New-Object System.Windows.Forms.Label
+    $lblProjectName.Location = New-Object System.Drawing.Point(15, 18)
+    $lblProjectName.Size = New-Object System.Drawing.Size(150, 22)
+    $lblProjectName.Text = "Project / repo name:"
+    $lblProjectName.Font = $fontBold
+    $dialog.Controls.Add($lblProjectName)
+
+    $txtProjectName = New-Object System.Windows.Forms.TextBox
+    $txtProjectName.Location = New-Object System.Drawing.Point(175, 15)
+    $txtProjectName.Size = New-Object System.Drawing.Size(390, 24)
+    $dialog.Controls.Add($txtProjectName)
+
+    $lblOwner = New-Object System.Windows.Forms.Label
+    $lblOwner.Location = New-Object System.Drawing.Point(15, 55)
+    $lblOwner.Size = New-Object System.Drawing.Size(150, 22)
+    $lblOwner.Text = "GitHub owner:"
+    $lblOwner.Font = $fontBold
+    $dialog.Controls.Add($lblOwner)
+
+    $txtOwner = New-Object System.Windows.Forms.TextBox
+    $txtOwner.Location = New-Object System.Drawing.Point(175, 52)
+    $txtOwner.Size = New-Object System.Drawing.Size(390, 24)
+    $txtOwner.Text = Get-DefaultGitHubOwner
+    $dialog.Controls.Add($txtOwner)
+
+    $lblBranch = New-Object System.Windows.Forms.Label
+    $lblBranch.Location = New-Object System.Drawing.Point(15, 92)
+    $lblBranch.Size = New-Object System.Drawing.Size(150, 22)
+    $lblBranch.Text = "Default branch:"
+    $lblBranch.Font = $fontBold
+    $dialog.Controls.Add($lblBranch)
+
+    $txtBranch = New-Object System.Windows.Forms.TextBox
+    $txtBranch.Location = New-Object System.Drawing.Point(175, 89)
+    $txtBranch.Size = New-Object System.Drawing.Size(160, 24)
+    $txtBranch.Text = "main"
+    $dialog.Controls.Add($txtBranch)
+
+    $chkPrivate = New-Object System.Windows.Forms.CheckBox
+    $chkPrivate.Location = New-Object System.Drawing.Point(355, 91)
+    $chkPrivate.Size = New-Object System.Drawing.Size(210, 22)
+    $chkPrivate.Text = "Create as private repository"
+    $chkPrivate.Checked = $true
+    $dialog.Controls.Add($chkPrivate)
+
+    $lblRoot = New-Object System.Windows.Forms.Label
+    $lblRoot.Location = New-Object System.Drawing.Point(15, 130)
+    $lblRoot.Size = New-Object System.Drawing.Size(150, 22)
+    $lblRoot.Text = "Projects root:"
+    $lblRoot.Font = $fontBold
+    $dialog.Controls.Add($lblRoot)
+
+    $txtRoot = New-Object System.Windows.Forms.TextBox
+    $txtRoot.Location = New-Object System.Drawing.Point(175, 127)
+    $txtRoot.Size = New-Object System.Drawing.Size(390, 24)
+    $txtRoot.Text = $script:ProjectsRoot
+    $txtRoot.ReadOnly = $true
+    $dialog.Controls.Add($txtRoot)
+
+    $lblHelp = New-Object System.Windows.Forms.Label
+    $lblHelp.Location = New-Object System.Drawing.Point(15, 165)
+    $lblHelp.Size = New-Object System.Drawing.Size(550, 40)
+    $lblHelp.Text = "Allowed project name characters: letters, numbers, dot, underscore and hyphen. The same name will be used for the local folder and GitHub repo."
+    $lblHelp.ForeColor = [System.Drawing.Color]::DarkSlateGray
+    $dialog.Controls.Add($lblHelp)
+
+    $btnCreate = New-Object System.Windows.Forms.Button
+    $btnCreate.Location = New-Object System.Drawing.Point(355, 220)
+    $btnCreate.Size = New-Object System.Drawing.Size(100, 30)
+    $btnCreate.Text = "Create"
+    $btnCreate.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dialog.Controls.Add($btnCreate)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Location = New-Object System.Drawing.Point(465, 220)
+    $btnCancel.Size = New-Object System.Drawing.Size(100, 30)
+    $btnCancel.Text = "Cancel"
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dialog.Controls.Add($btnCancel)
+
+    $dialog.AcceptButton = $btnCreate
+    $dialog.CancelButton = $btnCancel
+
+    $result = $dialog.ShowDialog($script:form)
+
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        ProjectName = $txtProjectName.Text.Trim()
+        GitHubOwner = $txtOwner.Text.Trim()
+        DefaultBranch = $txtBranch.Text.Trim()
+        IsPrivate = $chkPrivate.Checked
+    }
+}
+
+function Ensure-InitialCommit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LocalPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName
+    )
+
+    $headCheck = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "rev-parse --verify HEAD" -LogCommand $false
+
+    if ($headCheck.Success) {
+        Write-GuiLog -Message "Initial commit already exists."
+        return $true
+    }
+
+    $readmePath = Join-Path -Path $LocalPath -ChildPath "README.md"
+
+    if (-not (Test-Path -LiteralPath $readmePath)) {
+        $readme = @()
+        $readme += "# $ProjectName"
+        $readme += ""
+        $readme += "Created with GitHub Project Sync Manager."
+        Set-Content -LiteralPath $readmePath -Value $readme -Encoding UTF8
+        Write-GuiLog -Message "Created README.md for initial commit."
+    }
+
+    $addResult = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "add ." -LogCommand $true
+
+    if (-not $addResult.Success) {
+        Write-GuiLog -Message "Failed to stage initial files." -Level "ERROR"
+        return $false
+    }
+
+    $commitResult = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "commit -m `"Initial commit`"" -LogCommand $true
+
+    if (-not $commitResult.Success) {
+        Write-GuiLog -Message "Failed to create initial commit." -Level "ERROR"
+        return $false
+    }
+
+    return $true
+}
+
+function New-ProjectFromGui {
+    Write-GuiLog -Message "New Project clicked."
+
+    if (-not $script:GitAvailable) {
+        $script:GitAvailable = Test-GitInstalled
+    }
+
+    if (-not $script:GitAvailable) {
+        Write-GuiLog -Message "New Project blocked. Git is not available in PATH." -Level "ERROR"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Git is not available in PATH.`r`n`r`nInstall Git or fix PATH and try again.",
+            "Git missing",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+
+        return
+    }
+
+    if (-not (Test-GitHubCliInstalled)) {
+        Write-GuiLog -Message "New Project blocked. GitHub CLI was not found." -Level "ERROR"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "GitHub CLI was not found.`r`n`r`nInstall GitHub CLI and authenticate using:`r`ngh auth login",
+            "GitHub CLI missing",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+
+        return
+    }
+
+    $authResult = Invoke-GhCommand -Arguments "auth status" -LogCommand $false
+
+    if (-not $authResult.Success) {
+        Write-GuiLog -Message "New Project blocked. GitHub CLI is not authenticated." -Level "ERROR"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "GitHub CLI is not authenticated.`r`n`r`nRun this first in PowerShell:`r`ngh auth login",
+            "GitHub authentication required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+
+        return
+    }
+
+    if ($script:Projects.Count -eq 0) {
+        Load-Projects
+    }
+
+    $input = Show-NewProjectDialog
+
+    if ($null -eq $input) {
+        Write-GuiLog -Message "New Project cancelled by user."
+        return
+    }
+
+    $projectName = $input.ProjectName
+    $githubOwner = $input.GitHubOwner
+    $defaultBranch = $input.DefaultBranch
+
+    if (-not (Test-ProjectNameIsValid -ProjectName $projectName)) {
+        Write-GuiLog -Message "New Project blocked. Invalid project name: $projectName" -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Invalid project name.`r`n`r`nUse only letters, numbers, dot, underscore and hyphen.`r`nDo not start or end with a dot.",
+            "Invalid project name",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    if (Test-IsBlank -Value $githubOwner) {
+        Write-GuiLog -Message "New Project blocked. GitHub owner is blank." -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "GitHub owner cannot be blank.",
+            "GitHub owner required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    if (Test-IsBlank -Value $defaultBranch) {
+        $defaultBranch = "main"
+    }
+
+    $localPath = Join-Path -Path $script:ProjectsRoot -ChildPath $projectName
+    $repoUrl = "https://github.com/$githubOwner/$projectName.git"
+    $repoFullName = "$githubOwner/$projectName"
+
+    if (Test-ProjectAlreadyConfigured -ProjectName $projectName -LocalPath $localPath -RepoUrl $repoUrl) {
+        Write-GuiLog -Message "New Project blocked. Project already exists in projects.json or uses same path/repo." -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "A project with the same name, local path, or repo URL is already configured.",
+            "Project already configured",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    $summary = @()
+    $summary += "Create new project?"
+    $summary += ""
+    $summary += "Project name: $projectName"
+    $summary += "Local folder: $localPath"
+    $summary += "GitHub repo: $repoUrl"
+    $summary += "Default branch: $defaultBranch"
+
+    if ($input.IsPrivate) {
+        $summary += "Visibility: Private"
+    }
+    else {
+        $summary += "Visibility: Public"
+    }
+
+    $summary += ""
+    $summary += "The tool will:"
+    $summary += "- Create the local folder if missing"
+    $summary += "- Initialise Git if needed"
+    $summary += "- Create README.md if needed"
+    $summary += "- Create an initial commit if needed"
+    $summary += "- Create the GitHub repo using GitHub CLI"
+    $summary += "- Configure origin"
+    $summary += "- Push the branch"
+    $summary += "- Add the project to projects.json"
+    $summary += ""
+    $summary += "No destructive Git commands will be used."
+    $summary += ""
+    $summary += "Continue?"
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        ($summary -join "`r`n"),
+        "Confirm New Project",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-GuiLog -Message "New Project cancelled at confirmation."
+        return
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $script:ProjectsRoot)) {
+            New-Item -Path $script:ProjectsRoot -ItemType Directory -Force | Out-Null
+            Write-GuiLog -Message "Created projects root: $script:ProjectsRoot"
+        }
+
+        if (-not (Test-Path -LiteralPath $localPath)) {
+            New-Item -Path $localPath -ItemType Directory -Force | Out-Null
+            Write-GuiLog -Message "Created project folder: $localPath"
+        }
+
+        $inside = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "rev-parse --is-inside-work-tree" -LogCommand $false
+
+        if (-not $inside.Success -or $inside.StdOut -ne "true") {
+            Write-GuiLog -Message "Initialising Git repository."
+
+            $initResult = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "init -b $defaultBranch" -LogCommand $true
+
+            if (-not $initResult.Success) {
+                Write-GuiLog -Message "git init -b failed. Trying compatible init flow." -Level "WARN"
+
+                $initFallback = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "init" -LogCommand $true
+
+                if (-not $initFallback.Success) {
+                    throw "Failed to initialise Git repository."
+                }
+
+                $branchResult = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "checkout -b $defaultBranch" -LogCommand $true
+
+                if (-not $branchResult.Success) {
+                    throw "Failed to create default branch."
+                }
+            }
+        }
+        else {
+            Write-GuiLog -Message "Folder is already a Git repository."
+        }
+
+        $branchCheck = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "rev-parse --abbrev-ref HEAD" -LogCommand $false
+
+        if ($branchCheck.Success) {
+            if ($branchCheck.StdOut -eq "HEAD") {
+                throw "Repository is in detached HEAD state."
+            }
+        }
+
+        if (-not (Ensure-InitialCommit -LocalPath $localPath -ProjectName $projectName)) {
+            throw "Failed to ensure initial commit."
+        }
+
+        $repoView = Invoke-GhCommand -Arguments "repo view $repoFullName" -LogCommand $true
+        $repoExists = $false
+
+        if ($repoView.Success) {
+            $repoExists = $true
+            Write-GuiLog -Message "GitHub repository already exists: $repoFullName"
+        }
+
+        if (-not $repoExists) {
+            if ($input.IsPrivate) {
+                $visibilityArg = "--private"
+            }
+            else {
+                $visibilityArg = "--public"
+            }
+
+            Write-GuiLog -Message "Creating GitHub repository: $repoFullName"
+
+            $createResult = Invoke-GhCommand -Arguments "repo create $repoFullName $visibilityArg --source `"$localPath`" --remote origin --push" -LogCommand $true
+
+            if (-not $createResult.Success) {
+                throw "GitHub repository creation failed."
+            }
+        }
+        else {
+            $remote = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "remote get-url origin" -LogCommand $false
+
+            if (-not $remote.Success -or (Test-IsBlank -Value $remote.StdOut)) {
+                $remoteAdd = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "remote add origin $repoUrl" -LogCommand $true
+
+                if (-not $remoteAdd.Success) {
+                    throw "Failed to add origin remote."
+                }
+            }
+            else {
+                $currentRemote = Normalize-RepoUrl -RepoUrl $remote.StdOut
+                $expectedRemote = Normalize-RepoUrl -RepoUrl $repoUrl
+
+                if ($currentRemote -ne $expectedRemote) {
+                    throw "Existing origin does not match expected repo URL. Manual review required."
+                }
+            }
+
+            $pullResult = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "pull --ff-only origin $defaultBranch" -LogCommand $true
+
+            if (-not $pullResult.Success) {
+                Write-GuiLog -Message "Pull from existing repo was not possible. This may be normal for an empty/new local repo." -Level "WARN"
+            }
+
+            $pushResult = Invoke-GitCommand -WorkingDirectory $localPath -Arguments "push -u origin $defaultBranch" -LogCommand $true
+
+            if (-not $pushResult.Success) {
+                throw "Failed to push branch to existing GitHub repository."
+            }
+        }
+
+        $newProject = [PSCustomObject]@{
+            Name = $projectName
+            LocalPath = $localPath
+            RepoUrl = $repoUrl
+            DefaultBranch = $defaultBranch
+        }
+
+        $script:Projects += $newProject
+
+        if (-not (Save-ProjectsConfig)) {
+            throw "Project was created, but projects.json could not be updated."
+        }
+
+        Set-ProjectRunState -ProjectName $projectName -LastAction "New Project" -LastResult "Created"
+
+        Load-Projects
+        Refresh-List
+
+        Write-GuiLog -Message "New project created and added successfully: $projectName"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "New project created successfully.`r`n`r`nProject: $projectName`r`nLocal folder: $localPath`r`nGitHub repo: $repoUrl",
+            "New Project Created",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        )
+    }
+    catch {
+        Write-GuiLog -Message "New Project failed: $($_.Exception.Message)" -Level "ERROR"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "New Project failed.`r`n`r`n$($_.Exception.Message)`r`n`r`nCheck the GUI log for details.",
+            "New Project failed",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+    }
+}
+
+
+function Get-DefaultGitHubOwnerSimple {
+    if (-not (Test-IsBlank -Value $script:DefaultGitHubOwner)) {
+        return $script:DefaultGitHubOwner
+    }
+
+    foreach ($project in $script:Projects) {
+        if ($null -ne $project.RepoUrl) {
+            $repoUrl = [string]$project.RepoUrl
+
+            if ($repoUrl -match "github\.com[:/]+([^/]+)/") {
+                return $matches[1]
+            }
+        }
+    }
+
+    if (Test-Path -LiteralPath $script:ConfigPath) {
+        try {
+            $json = Get-Content -LiteralPath $script:ConfigPath -Raw
+
+            if (-not (Test-IsBlank -Value $json)) {
+                if ($json -match "github\.com[:/]+([^/]+)/") {
+                    return $matches[1]
+                }
+            }
+        }
+        catch {
+            return ""
+        }
+    }
+
+    return ""
+}
+
+function Test-ProjectNameIsValidSimple {
+    param(
+        [AllowNull()]
+        [string]$ProjectName
+    )
+
+    if (Test-IsBlank -Value $ProjectName) {
+        return $false
+    }
+
+    if ($ProjectName -notmatch "^[A-Za-z0-9._-]+$") {
+        return $false
+    }
+
+    if ($ProjectName.StartsWith(".")) {
+        return $false
+    }
+
+    if ($ProjectName.EndsWith(".")) {
+        return $false
+    }
+
+    return $true
+}
+
+function Save-ProjectsConfigSimple {
+    try {
+        $rows = @()
+
+        foreach ($project in $script:Projects) {
+            $rows += [PSCustomObject]@{
+                Name = $project.Name
+                LocalPath = $project.LocalPath
+                RepoUrl = $project.RepoUrl
+                DefaultBranch = $project.DefaultBranch
+            }
+        }
+
+        $json = $rows | ConvertTo-Json -Depth 5
+        Set-Content -LiteralPath $script:ConfigPath -Value $json -Encoding UTF8
+
+        Write-GuiLog -Message "projects.json updated successfully."
+        return $true
+    }
+    catch {
+        Write-GuiLog -Message "Failed to save projects.json: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    }
+}
+
+function Test-ProjectAlreadyConfiguredSimple {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LocalPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoUrl
+    )
+
+    $targetRepo = Normalize-RepoUrl -RepoUrl $RepoUrl
+
+    foreach ($project in $script:Projects) {
+        $existingName = ""
+        $existingPath = ""
+        $existingRepo = ""
+
+        if ($null -ne $project.Name) {
+            $existingName = [string]$project.Name
+        }
+
+        if ($null -ne $project.LocalPath) {
+            $existingPath = [string]$project.LocalPath
+        }
+
+        if ($null -ne $project.RepoUrl) {
+            $existingRepo = Normalize-RepoUrl -RepoUrl ([string]$project.RepoUrl)
+        }
+
+        if ($existingName.ToLower() -eq $ProjectName.ToLower()) {
+            return $true
+        }
+
+        if ($existingPath.ToLower() -eq $LocalPath.ToLower()) {
+            return $true
+        }
+
+        if (-not (Test-IsBlank -Value $existingRepo)) {
+            if ($existingRepo -eq $targetRepo) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Ensure-ProjectFolderGitSyncSimple {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LocalPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoUrl,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DefaultBranch
+    )
+
+    if (Test-IsBlank -Value $DefaultBranch) {
+        $DefaultBranch = "main"
+    }
+
+    if (-not (Test-Path -LiteralPath $LocalPath)) {
+        try {
+            Write-GuiLog -Message "Local folder does not exist. Creating folder: $LocalPath"
+
+            $parentFolder = Split-Path -Path $LocalPath -Parent
+
+            if (-not (Test-Path -LiteralPath $parentFolder)) {
+                Write-GuiLog -Message "Projects root folder does not exist. Creating folder: $parentFolder"
+                New-Item -Path $parentFolder -ItemType Directory -Force | Out-Null
+            }
+
+            New-Item -Path $LocalPath -ItemType Directory -Force | Out-Null
+
+            Write-GuiLog -Message "Local project folder created successfully: $LocalPath"
+        }
+        catch {
+            Write-GuiLog -Message "Failed to create local project folder: $($_.Exception.Message)" -Level "ERROR"
+            return
+        }
+    }
+
+    if (-not $script:GitAvailable) {
+        $script:GitAvailable = Test-GitInstalled
+    }
+
+    if (-not $script:GitAvailable) {
+        Write-GuiLog -Message "Git is not available in PATH. Git setup was skipped." -Level "ERROR"
+        return
+    }
+
+    Write-GuiLog -Message "Checking Git setup for project folder: $LocalPath"
+
+    $inside = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "rev-parse --is-inside-work-tree" -LogCommand $false
+
+    if (-not $inside.Success -or $inside.StdOut -ne "true") {
+        Write-GuiLog -Message "Folder is not a Git repository. Running safe git init."
+
+        $initResult = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "init -b $DefaultBranch" -LogCommand $true
+
+        if (-not $initResult.Success) {
+            Write-GuiLog -Message "git init -b failed. Trying compatible git init flow." -Level "WARN"
+
+            $initFallback = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "init" -LogCommand $true
+
+            if (-not $initFallback.Success) {
+                Write-GuiLog -Message "Git setup failed. Could not initialise repository." -Level "ERROR"
+                return
+            }
+
+            $branchResult = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "checkout -b $DefaultBranch" -LogCommand $true
+
+            if (-not $branchResult.Success) {
+                Write-GuiLog -Message "Git setup warning. Could not create branch $DefaultBranch. You may need to create it manually." -Level "WARN"
+            }
+        }
+    }
+    else {
+        Write-GuiLog -Message "Folder is already a Git repository."
+    }
+
+    $remote = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "remote get-url origin" -LogCommand $false
+
+    if (-not $remote.Success -or (Test-IsBlank -Value $remote.StdOut)) {
+        Write-GuiLog -Message "Origin remote is missing. Adding origin: $RepoUrl"
+
+        $remoteAdd = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "remote add origin $RepoUrl" -LogCommand $true
+
+        if (-not $remoteAdd.Success) {
+            Write-GuiLog -Message "Failed to add origin remote. Please add it manually." -Level "ERROR"
+            return
+        }
+    }
+    else {
+        $currentRemote = Normalize-RepoUrl -RepoUrl $remote.StdOut
+        $expectedRemote = Normalize-RepoUrl -RepoUrl $RepoUrl
+
+        if ($currentRemote -ne $expectedRemote) {
+            Write-GuiLog -Message "Existing origin does not match expected repo URL." -Level "ERROR"
+            Write-GuiLog -Message "Existing origin: $($remote.StdOut)" -Level "ERROR"
+            Write-GuiLog -Message "Expected origin: $RepoUrl" -Level "ERROR"
+            Write-GuiLog -Message "No remote changes were applied. Please review manually." -Level "ERROR"
+            return
+        }
+
+        Write-GuiLog -Message "Origin remote already matches expected repo."
+    }
+
+    $headCheck = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "rev-parse --verify HEAD" -LogCommand $false
+
+    if (-not $headCheck.Success) {
+        Write-GuiLog -Message "No initial commit found. Creating README.md and initial commit if needed."
+
+        $readmePath = Join-Path -Path $LocalPath -ChildPath "README.md"
+
+        if (-not (Test-Path -LiteralPath $readmePath)) {
+            $readme = @()
+            $readme += "# $ProjectName"
+            $readme += ""
+            $readme += "Created for GitHub Project Sync Manager."
+            Set-Content -LiteralPath $readmePath -Value $readme -Encoding UTF8
+
+            Write-GuiLog -Message "Created README.md."
+        }
+
+        $addResult = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "add ." -LogCommand $true
+
+        if (-not $addResult.Success) {
+            Write-GuiLog -Message "Failed to stage files for initial commit." -Level "ERROR"
+            return
+        }
+
+        $commitResult = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "commit -m `"Initial commit`"" -LogCommand $true
+
+        if (-not $commitResult.Success) {
+            Write-GuiLog -Message "Initial commit failed. Check Git user.name/user.email configuration." -Level "ERROR"
+            return
+        }
+
+        Write-GuiLog -Message "Initial commit created."
+    }
+    else {
+        Write-GuiLog -Message "Repository already has at least one commit."
+    }
+
+    Write-GuiLog -Message "Attempting safe push to origin/$DefaultBranch."
+
+    $pushResult = Invoke-GitCommand -WorkingDirectory $LocalPath -Arguments "push -u origin $DefaultBranch" -LogCommand $true
+
+    if ($pushResult.Success) {
+        Write-GuiLog -Message "Push completed successfully for $ProjectName."
+        return
+    }
+
+    Write-GuiLog -Message "Push did not complete successfully." -Level "WARN"
+    Write-GuiLog -Message "This can happen if the GitHub repo has existing files, credentials are required, or the remote branch already has commits." -Level "WARN"
+    Write-GuiLog -Message "The project has still been added to projects.json. Use Check Status and review manually if needed." -Level "WARN"
+}
+
+function Get-ConfiguredProjectByNameSimple {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName
+    )
+
+    foreach ($project in $script:Projects) {
+        if ($null -ne $project.Name) {
+            $existingName = [string]$project.Name
+
+            if ($existingName.ToLower() -eq $ProjectName.ToLower()) {
+                return $project
+            }
+        }
+    }
+
+    return $null
+}
+
+function Repair-ExistingProjectFromNameSimple {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName
+    )
+
+    $existingProject = Get-ConfiguredProjectByNameSimple -ProjectName $ProjectName
+
+    if ($null -eq $existingProject) {
+        return $false
+    }
+
+    $existingName = [string]$existingProject.Name
+    $existingLocalPath = [string]$existingProject.LocalPath
+    $existingRepoUrl = [string]$existingProject.RepoUrl
+    $existingDefaultBranch = [string]$existingProject.DefaultBranch
+
+    if (Test-IsBlank -Value $existingDefaultBranch) {
+        $existingDefaultBranch = "main"
+    }
+
+    $summary = @()
+    $summary += "This project is already configured in projects.json."
+    $summary += ""
+    $summary += "Project: $existingName"
+    $summary += "Local folder: $existingLocalPath"
+    $summary += "GitHub repo: $existingRepoUrl"
+    $summary += "Default branch: $existingDefaultBranch"
+    $summary += ""
+    $summary += "Do you want the tool to create/repair the local folder and check Git setup?"
+    $summary += ""
+    $summary += "The tool will:"
+    $summary += "- Create the local folder if missing"
+    $summary += "- Run safe git init if needed"
+    $summary += "- Add origin if missing"
+    $summary += "- Create README.md and initial commit if needed"
+    $summary += "- Try a normal push to origin/main"
+    $summary += ""
+    $summary += "No destructive Git commands will be used."
+    $summary += ""
+    $summary += "Continue?"
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        ($summary -join "`r`n"),
+        "Project already configured",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-GuiLog -Message "Repair existing project cancelled by user."
+        return $true
+    }
+
+    Write-GuiLog -Message "Repairing existing configured project: $existingName"
+
+    Ensure-ProjectFolderGitSyncSimple -ProjectName $existingName -LocalPath $existingLocalPath -RepoUrl $existingRepoUrl -DefaultBranch $existingDefaultBranch
+
+    Set-ProjectRunState -ProjectName $existingName -LastAction "Repair Project" -LastResult "Repair Attempted"
+
+    Load-Projects
+    Refresh-List
+
+    if ($null -ne $script:txtNewProjectName) {
+        $script:txtNewProjectName.Text = ""
+    }
+
+    [void][System.Windows.Forms.MessageBox]::Show(
+        "Repair/check completed for existing project.`r`n`r`nProject: $existingName`r`nLocal folder: $existingLocalPath",
+        "Project repair/check complete",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+
+    return $true
+}
+
+
+function Add-ProjectFromMainTextbox {
+    Write-GuiLog -Message "Add Project clicked."
+
+    if ($script:Projects.Count -eq 0) {
+        Load-Projects
+    }
+
+    if ($null -eq $script:txtNewProjectName) {
+        Write-GuiLog -Message "Add Project textbox was not found." -Level "ERROR"
+        return
+    }
+
+    $projectName = $script:txtNewProjectName.Text
+
+    if ($null -ne $projectName) {
+        $projectName = $projectName.Trim()
+    }
+
+    if (-not (Test-ProjectNameIsValidSimple -ProjectName $projectName)) {
+        Write-GuiLog -Message "Add Project blocked. Invalid project name: $projectName" -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Invalid project name.`r`n`r`nUse only letters, numbers, dot, underscore and hyphen.`r`nDo not start or end with a dot.",
+            "Invalid project name",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    $githubOwner = Get-DefaultGitHubOwnerSimple
+
+    if (Test-IsBlank -Value $githubOwner) {
+        Write-GuiLog -Message "Could not infer GitHub owner from projects.json." -Level "ERROR"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Could not infer the GitHub account/owner from projects.json.`r`n`r`nPlease make sure at least one existing project has a GitHub URL, or set `$script:DefaultGitHubOwner in the script.",
+            "GitHub owner not found",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+
+        return
+    }
+
+    if (Test-IsBlank -Value $script:ProjectsRoot) {
+        $script:ProjectsRoot = Split-Path -Path $script:ScriptRoot -Parent
+    }
+
+    $defaultBranch = "main"
+    $localPath = Join-Path -Path $script:ProjectsRoot -ChildPath $projectName
+    $repoUrl = "https://github.com/$githubOwner/$projectName.git"
+
+    if (Test-ProjectAlreadyConfiguredSimple -ProjectName $projectName -LocalPath $localPath -RepoUrl $repoUrl) {
+        Write-GuiLog -Message "Project already exists in projects.json. Offering repair/check option."
+
+        $repairHandled = Repair-ExistingProjectFromNameSimple -ProjectName $projectName
+
+        if ($repairHandled) {
+            return
+        }
+
+        Write-GuiLog -Message "Add Project blocked. Project already exists in projects.json or uses same path/repo." -Level "WARN"
+
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "A project with the same name, local path, or repo URL is already configured.",
+            "Project already configured",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
+    $summary = @()
+    $summary += "Add project to projects.json?"
+    $summary += ""
+    $summary += "Project name: $projectName"
+    $summary += "Local folder: $localPath"
+    $summary += "GitHub repo: $repoUrl"
+    $summary += "Default branch: $defaultBranch"
+    $summary += ""
+    $summary += "Expected manual preparation:"
+    $summary += "- You create the GitHub repo in the browser"
+    $summary += ""
+    $summary += "The tool will:"
+    $summary += "- Create the local folder if missing"
+    $summary += "- Add the project to projects.json"
+    $summary += "- Check/init Git safely"
+    $summary += "- Add origin if missing"
+    $summary += "- Create README.md and initial commit if needed"
+    $summary += "- Try a normal push to origin/main"
+    $summary += ""
+    $summary += "No destructive Git commands will be used."
+    $summary += ""
+    $summary += "Continue?"
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        ($summary -join "`r`n"),
+        "Confirm Add Project",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-GuiLog -Message "Add Project cancelled by user."
+        return
+    }
+
+    $newProject = [PSCustomObject]@{
+        Name = $projectName
+        LocalPath = $localPath
+        RepoUrl = $repoUrl
+        DefaultBranch = $defaultBranch
+    }
+
+    $script:Projects += $newProject
+
+    if (-not (Save-ProjectsConfigSimple)) {
+        Write-GuiLog -Message "Add Project failed because projects.json could not be updated." -Level "ERROR"
+        return
+    }
+
+    Set-ProjectRunState -ProjectName $projectName -LastAction "Add Project" -LastResult "Added to Config"
+
+    Ensure-ProjectFolderGitSyncSimple -ProjectName $projectName -LocalPath $localPath -RepoUrl $repoUrl -DefaultBranch $defaultBranch
+
+    Load-Projects
+    Refresh-List
+
+    $script:txtNewProjectName.Text = ""
+
+    Write-GuiLog -Message "Project added successfully: $projectName"
+
+    [void][System.Windows.Forms.MessageBox]::Show(
+        "Project added successfully.`r`n`r`nProject: $projectName`r`nLocal folder: $localPath`r`nGitHub repo: $repoUrl",
+        "Project Added",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+}
+
 
 function Load-Projects {
     $script:Projects = @()
@@ -930,7 +2143,7 @@ function Push-SelectedProject {
 Initialize-Log
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "GitHub Project Sync Manager - Phase 5.3 Enhanced Reports"
+$form.Text = "GitHub Project Sync Manager - Phase 6 Add Project Folder Fix"
 $form.Size = New-Object System.Drawing.Size(1680, 880)
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = New-Object System.Drawing.Size(1450, 760)
@@ -1037,6 +2250,11 @@ $btnExportReport.Location = New-Object System.Drawing.Point(1462, 45)
 $btnExportReport.Size = New-Object System.Drawing.Size(100, 32)
 $btnExportReport.Text = "Export Report"
 $form.Controls.Add($btnExportReport)
+$btnNewProject = New-Object System.Windows.Forms.Button
+$btnNewProject.Location = New-Object System.Drawing.Point(1325, 84)
+$btnNewProject.Size = New-Object System.Drawing.Size(120, 30)
+$btnNewProject.Text = "New Project"
+$form.Controls.Add($btnNewProject)
 $btnClearLog = New-Object System.Windows.Forms.Button
 $btnClearLog.Location = New-Object System.Drawing.Point(1572, 45)
 $btnClearLog.Size = New-Object System.Drawing.Size(100, 32)
@@ -1073,10 +2291,29 @@ $chkBlockPullWithChanges.Checked = $true
 $form.Controls.Add($chkBlockPullWithChanges)
 $script:chkBlockPullWithChanges = $chkBlockPullWithChanges
 
+$lblNewProject = New-Object System.Windows.Forms.Label
+$lblNewProject.Location = New-Object System.Drawing.Point(1325, 88)
+$lblNewProject.Size = New-Object System.Drawing.Size(90, 22)
+$lblNewProject.Text = "New project:"
+$lblNewProject.Font = $fontBold
+$form.Controls.Add($lblNewProject)
+
+$txtNewProjectName = New-Object System.Windows.Forms.TextBox
+$txtNewProjectName.Location = New-Object System.Drawing.Point(1415, 86)
+$txtNewProjectName.Size = New-Object System.Drawing.Size(145, 24)
+$txtNewProjectName.Text = ""
+$form.Controls.Add($txtNewProjectName)
+$script:txtNewProjectName = $txtNewProjectName
+
+$btnAddProject = New-Object System.Windows.Forms.Button
+$btnAddProject.Location = New-Object System.Drawing.Point(1570, 84)
+$btnAddProject.Size = New-Object System.Drawing.Size(100, 28)
+$btnAddProject.Text = "Add Project"
+$form.Controls.Add($btnAddProject)
 $lblSafety = New-Object System.Windows.Forms.Label
 $lblSafety.Location = New-Object System.Drawing.Point(12, 118)
 $lblSafety.Size = New-Object System.Drawing.Size(1380, 22)
-$lblSafety.Text = "Phase 5.3 safety: Enhanced report export is read-only. Git safety rules remain unchanged."
+$lblSafety.Text = "Phase 6 safety: Add Project updates projects.json and can initialise local Git safely when the folder exists. No GitHub CLI or destructive Git commands are used."
 $lblSafety.ForeColor = [System.Drawing.Color]::DarkGreen
 $lblSafety.Font = $fontBold
 $form.Controls.Add($lblSafety)
@@ -1181,6 +2418,12 @@ $btnDetails.Add_Click({
 })
 
 
+$btnNewProject.Add_Click({
+    Add-ProjectFromMainTextbox
+})
+$btnAddProject.Add_Click({
+    Add-ProjectFromMainTextbox
+})
 $btnExportReport.Add_Click({
     Export-SyncReportBundle
 })
@@ -1199,7 +2442,7 @@ $lvProjects.Add_DoubleClick({
 
 $form.Add_Shown({
     Write-GuiLog -Message "GitHub Project Sync Manager started."
-    Write-GuiLog -Message "Phase: 5.3 - Enhanced Reports"
+    Write-GuiLog -Message "Phase: 6 - Add Project Folder Fix"
     Write-GuiLog -Message "Config path: $script:ConfigPath"
     Write-GuiLog -Message "Log file: $script:LogFile"
 
@@ -2187,7 +3430,53 @@ function Export-SyncReportBundle {
     )
 }
 
+
+# ------------------------------------------------------------
+# Phase 6 GUI/folder fix v2 applied
+# ------------------------------------------------------------
+
+# Hide the old Phase 6 "New Project" button if it exists.
+# The simple workflow only needs the project name textbox and Add Project button.
+if ($null -ne $btnNewProject) {
+    $btnNewProject.Visible = $false
+    $btnNewProject.Enabled = $false
+}
+
+# Move the Add Project controls onto a clean dedicated row.
+if ($null -ne $lblNewProject) {
+    $lblNewProject.Location = New-Object System.Drawing.Point(12, 118)
+    $lblNewProject.Size = New-Object System.Drawing.Size(110, 22)
+    $lblNewProject.Text = "Project name:"
+}
+
+if ($null -ne $txtNewProjectName) {
+    $txtNewProjectName.Location = New-Object System.Drawing.Point(135, 116)
+    $txtNewProjectName.Size = New-Object System.Drawing.Size(360, 24)
+}
+
+if ($null -ne $btnAddProject) {
+    $btnAddProject.Location = New-Object System.Drawing.Point(510, 114)
+    $btnAddProject.Size = New-Object System.Drawing.Size(120, 28)
+    $btnAddProject.Text = "Add Project"
+}
+
+# Move the safety label down so it no longer clashes with the new project controls.
+if ($null -ne $lblSafety) {
+    $lblSafety.Location = New-Object System.Drawing.Point(12, 150)
+    $lblSafety.Size = New-Object System.Drawing.Size(1600, 22)
+    $lblSafety.Text = "Phase 6 safety: Add Project can create the local folder, update projects.json, initialise local Git safely, add origin, and attempt a normal push. No GitHub CLI or destructive Git commands are used."
+}
+
+# Move the project list down to make room for the new project row.
+if ($null -ne $lvProjects) {
+    $lvProjects.Location = New-Object System.Drawing.Point(12, 180)
+    $lvProjects.Size = New-Object System.Drawing.Size(1635, 390)
+}
+
 [void]$form.ShowDialog()
+
+
+
 
 
 
