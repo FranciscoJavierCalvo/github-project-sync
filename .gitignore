@@ -52,3 +52,7 @@ Finalize-GitHubProjectSyncProject.ps1
 
 
 
+
+# Generated EXE release artefacts
+release/*.exe
+release/*.log

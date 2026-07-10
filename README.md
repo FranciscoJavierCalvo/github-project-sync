@@ -324,3 +324,67 @@ Future optional improvements:
 - Persistent last action history
 - UI resizing improvements
 - Optional per-project commit messages
+
+## Optional EXE packaging
+
+The PowerShell script remains the source of truth for this project:
+
+```text
+GitHubProjectSync-GUI.ps1
+```
+
+An EXE can optionally be generated as a convenience wrapper for easier launching.
+
+The generated EXE should be treated as a release artefact only. Any code changes should be made in the `.ps1` file first, tested there, and then rebuilt into a new EXE.
+
+### Build script
+
+The repo includes:
+
+```powershell
+Build-GitHubProjectSyncManagerExe.ps1
+```
+
+This script builds:
+
+```text
+release\GitHubProjectSyncManager.exe
+```
+
+By default, the build script deletes the previous EXE with the same name before generating a new one.
+
+### Build command
+
+Run from the repo root:
+
+```powershell
+.\Build-GitHubProjectSyncManagerExe.ps1
+```
+
+Optional examples:
+
+```powershell
+.\Build-GitHubProjectSyncManagerExe.ps1 -OpenOutputFolder
+```
+
+```powershell
+.\Build-GitHubProjectSyncManagerExe.ps1 -KeepPrevious
+```
+
+### Requirements
+
+- Windows PowerShell 5.1
+- GitHubProjectSync-GUI.ps1 in the repo root
+- PS2EXE available as `Invoke-ps2exe` or `ps2exe`
+
+If PS2EXE is not available, the build script will stop safely and explain what is missing.
+
+### Recommended workflow
+
+1. Make changes to `GitHubProjectSync-GUI.ps1`.
+2. Test the `.ps1` version first.
+3. Run `Build-GitHubProjectSyncManagerExe.ps1`.
+4. Test the generated EXE.
+5. Commit the source/script changes.
+
+The EXE is ignored by default via `.gitignore`. If a binary release is needed, publish the EXE separately as a release artefact rather than treating it as the source of truth.
